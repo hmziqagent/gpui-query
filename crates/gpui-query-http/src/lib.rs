@@ -11,7 +11,7 @@
 //!
 //! [`HttpCache`] is generic over a [`HttpBackend`] — a trait that abstracts a
 //! single conditional `GET`. The crate ships *one* optional backend,
-//! [`ReqwestBackend`](crate::reqwest_backend::ReqwestBackend), behind the
+//! [`ReqwestBackend`], behind the
 //! `reqwest` cargo feature; any other request library can implement
 //! [`HttpBackend`] and plug into [`HttpCache::new`](HttpCache::new) instead.
 //! `reqwest` is never a hard dependency.
@@ -19,7 +19,7 @@
 //! # Server wins
 //!
 //! Parse the response headers with [`cache_policy_from_headers`], hand the
-//! resulting [`CachePolicy`](gpui_query::core::CachePolicy) to
+//! resulting [`CachePolicy`] to
 //! [`Fetched::with_policy`](gpui_query::core::Fetched::with_policy), and the
 //! resource adopts the server's TTL:
 //!
@@ -34,6 +34,10 @@
 //! ```
 
 #![deny(missing_docs)]
+// docs.rs renders with `--cfg docsrs` (see [package.metadata.docs.rs]); enable
+// `#[doc(cfg(...))]` there so the `reqwest`-gated items are annotated with the
+// feature that enables them, matching the main crate's convention.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::time::Duration;
 
@@ -45,11 +49,13 @@ use thiserror::Error;
 pub mod backend;
 pub mod cache;
 #[cfg(feature = "reqwest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
 pub mod reqwest_backend;
 
-pub use backend::{BackendResponse, Conditionals, HttpBackend};
+pub use backend::{BackendResponse, Conditionals, HttpBackend, MaybeSend};
 pub use cache::{HttpCache, HttpError};
 #[cfg(feature = "reqwest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
 pub use reqwest_backend::ReqwestBackend;
 
 /// HTTP cache metadata extracted from a response.

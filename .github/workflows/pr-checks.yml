@@ -6,6 +6,12 @@ on:
       - "web/**"
       - "shared/**"
       - ".github/workflows/pr-checks.yml"
+      # Sibling web workflows: without these, a PR touching only deploy.yml
+      # or web-preview.yml would get zero checks. The dry-run below exercises
+      # the same bun build those workflows run, so their build-affecting
+      # changes (toolchain versions, build env) still get PR-time signal.
+      - ".github/workflows/deploy.yml"
+      - ".github/workflows/web-preview.yml"
 
 concurrency:
   group: pr-checks-${{ github.ref }}

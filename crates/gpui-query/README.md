@@ -27,6 +27,8 @@ If you only want the core state machine without pulling in GPUI:
 gpui-query = { version = "0.2.0", default-features = false, features = ["core"] }
 ```
 
+The `core` layer also builds for `wasm32-unknown-unknown`: the crate swaps ahash to compile-time RNG on wasm targets internally, so no extra configuration is needed. The `client`, `hook`, and `persist` layers are native-only — they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+
 ## Quick start
 
 Set up a `QueryClient` as a GPUI global when your app starts:

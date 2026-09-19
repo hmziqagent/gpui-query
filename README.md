@@ -37,6 +37,8 @@ To use only the core state machine with no GPUI dependency:
 gpui-query = { version = "0.2.0", default-features = false, features = ["core"] }
 ```
 
+The `core` layer also builds for `wasm32-unknown-unknown` — the crate handles the wasm-specific setup internally (ahash switches to compile-time RNG on wasm targets), so no consumer configuration is needed. The `client`, `hook`, and `persist` layers are native-only: they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+
 ## quick start
 
 Set up the `QueryClient` as a GPUI global during app initialization:

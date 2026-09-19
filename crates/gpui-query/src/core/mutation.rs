@@ -118,6 +118,9 @@ impl<V, T, E> MutationResource<V, T, E> {
     /// Wall-clock ms of the most recent terminal completion, or `None` if the
     /// mutation has never completed. Used by `MutationBucket` GC to measure
     /// recency from completion time rather than insertion time (audit #112).
+    // Only the `client` layer reads this accessor; core-only builds (e.g.
+    // wasm32 core) have no caller yet, so silence dead_code there.
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn last_updated_at_ms(&self) -> Option<u64> {
         self.last_updated_at_ms
     }

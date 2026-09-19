@@ -2,7 +2,7 @@
    gpui-query — Starlight theme
    Maps Starlight's --sl-* theme variables onto the shared design tokens
    (shared/tokens.css) so the docs share the marketing site's palette, fonts,
-   and sharp-radius identity. See astro-migration.mdx § "Starlight CSS".
+   and sharp-radius identity.
 
    Two facts make this work:
    1. Starlight's base styles live in @layer starlight.{base,components} (see the

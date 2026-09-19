@@ -6,8 +6,7 @@ import { faqCategories as categories, faqItems, faqSubtitle, faqDescription } fr
 // Native <details>/<summary> instead of a React accordion: the answers stay in
 // the DOM (crawlable for the FAQPage structured data) with no JS. The Q&A data
 // itself lives once in ../lib/faq-data and is shared with the /faq.md and
-// /faq.txt alt-format generator. See astro-migration.mdx § "Route and content
-// mapping".
+// /faq.txt alt-format generator.
 const title = "FAQ - gpui-query";
 const description = faqDescription;
 const jsonLd = faqPage({

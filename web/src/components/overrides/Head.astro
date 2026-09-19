@@ -12,7 +12,6 @@
 // `auto-trailing-slash`), and `@astrojs/sitemap` already advertises the
 // extensionless form. Stripping `.html` from just `canonical` and `og:url`
 // keeps the head consistent with the sitemap and the rest of the site.
-// See astro-migration.mdx § "SEO parity checks".
 
 const head = Astro.locals.starlightRoute.head.map((entry) => {
 	const attrs = entry.attrs ?? {};

@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+          # Without fetch-tags, a shallow checkout fetches NO tags, so the
+          # `git tag -l` guard below would always report "not exists" and
+          # every CHANGELOG-path push would re-attempt the release.
+          fetch-tags: true
 
       - name: Extract version from CHANGELOG
         id: changelog
@@ -101,6 +105,10 @@ jobs:
 
   publish-main:
     needs: check-and-release
+    # Same guard as the check_tag-gated steps above, via the job output —
+    # `needs:` alone would still run this job on the skip path (tag already
+    # exists) and re-attempt `cargo publish` on an already-released version.
+    if: needs.check-and-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,9 +117,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # No `workspaces` override: the repo root is the workspace root and
+      # rust-cache resolves the default "." against GITHUB_WORKSPACE, not the
+      # job's working-directory — the old "crates/gpui-query -> target"
+      # mapping cached a directory cargo never writes. The working-directory
+      # on the run steps below is unaffected.
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "crates/gpui-query -> target"
 
       - name: Verify version
         working-directory: crates/gpui-query
@@ -127,6 +138,9 @@ jobs:
 
   deploy-web:
     needs: [publish-main, check-and-release]
+    # Skip-path guard as in publish-main — avoids redundant prod redeploys
+    # when the CHANGELOG's first version heading is already tagged.
+    if: needs.check-and-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     environment: prod
     defaults:

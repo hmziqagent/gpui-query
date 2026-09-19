@@ -6,11 +6,14 @@
 //! ([`crate::reqwest_backend::ReqwestBackend`]); any other request library can
 //! implement this trait instead and feed [`crate::HttpCache::new`].
 //!
-//! The trait deliberately uses `-> impl Future<Output = …> + Send` rather than
-//! `async fn` so the returned futures are guaranteed `Send` and usable from any
-//! executor (GPUI's `background_executor`, tokio, etc.). This makes the trait
-//! non-object-safe; dispatch is generic (`HttpCache<B: HttpBackend>`), which is
-//! intentional and avoids `dyn` + `Pin<Box<dyn Future>>` overhead.
+//! The trait deliberately uses `-> impl Future<Output = …> + MaybeSend`
+//! (see [`MaybeSend`]) rather than `async fn` so the returned futures are
+//! guaranteed `Send` on native targets and usable from any executor (GPUI's
+//! `background_executor`, tokio, etc.); on `wasm32` the bound is a no-op
+//! because JS interop types — and therefore `reqwest`'s browser-fetch futures
+//! — are inherently `!Send`. This makes the trait non-object-safe; dispatch is
+//! generic (`HttpCache<B: HttpBackend>`), which is intentional and avoids
+//! `dyn` + `Pin<Box<dyn Future>>` overhead.
 
 use std::future::Future;
 
@@ -68,15 +71,43 @@ pub struct BackendResponse {
     pub body: Bytes,
 }
 
+/// Marker alias for [`Send`], relaxed to a no-op on `wasm32`.
+///
+/// [`HttpBackend::fetch`] bounds its returned future by `MaybeSend` so the
+/// same trait works everywhere: on native targets the bound is exactly
+/// [`Send`] (any executor may move the future across threads), while on
+/// `wasm32` browser-fetch backends such as `reqwest`'s are inherently
+/// `!Send` (their futures hold JS values) and execution is single-threaded,
+/// so no `Send` requirement is imposed.
+///
+/// Outside `wasm32` this is blanket-implemented: `T: MaybeSend` if and only
+/// if `T: Send`.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: ?Sized + Send> MaybeSend for T {}
+
+/// Marker alias for [`Send`], relaxed to a no-op on `wasm32`.
+///
+/// On `wasm32` every type implements `MaybeSend`: the browser-fetch backend
+/// of `reqwest` (and JS interop types generally) is `!Send` by design, and
+/// wasm executes on a single thread, so the `Send` requirement is dropped.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeSend for T {}
+
 /// A library-agnostic conditional `GET` backend.
 ///
 /// Implement this for your HTTP client of choice (the crate ships
 /// [`crate::reqwest_backend::ReqwestBackend`] behind the `reqwest` feature) and
 /// hand an instance to [`crate::HttpCache::new`].
 ///
-/// The returned future must be `Send` so it can run on any executor; the trait
-/// therefore uses `-> impl Future + Send` (not `async fn`). This makes the trait
-/// non-object-safe — dispatch is static, via `HttpCache<B: HttpBackend>`.
+/// On native targets the returned future must be `Send` so it can run on any
+/// executor; the trait therefore uses `-> impl Future + MaybeSend` (not
+/// `async fn`), where [`MaybeSend`] is [`Send`] everywhere except `wasm32`.
+/// This makes the trait non-object-safe — dispatch is static, via
+/// `HttpCache<B: HttpBackend>`.
 ///
 /// `fetch` must:
 ///
@@ -91,10 +122,10 @@ pub trait HttpBackend: Send + Sync {
 
     /// Perform a conditional `GET` against `url`.
     ///
-    /// The returned future must be `Send`.
+    /// The returned future must be [`MaybeSend`] (`Send` on native targets).
     fn fetch(
         &self,
         url: &str,
         conditionals: Conditionals,
-    ) -> impl Future<Output = Result<BackendResponse, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<BackendResponse, Self::Error>> + MaybeSend;
 }
