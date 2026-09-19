@@ -1,6 +1,6 @@
 [package]
 name = "gpui-query"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "TanStack Query-inspired async state management for GPUI"
 repository = "https://github.com/freeoxide/gpui-query"
