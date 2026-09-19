@@ -17,6 +17,17 @@ test:
 test-feature feature:
     cargo test --features "{{ feature }}"
 
+# ---- Wasm ----
+
+# Verify the wasm compile boundary (mirrors the Wasm Check CI workflow):
+# core-only main crate + http satellite (with and without reqwest) for
+# wasm32-unknown-unknown, then the native all-features build
+wasm-check:
+    cargo build --target wasm32-unknown-unknown -p gpui-query --no-default-features --features core
+    cargo build --target wasm32-unknown-unknown -p gpui-query-http
+    cargo build --target wasm32-unknown-unknown -p gpui-query-http --features reqwest
+    cargo build --all-features
+
 # ---- Website (Astro + Starlight) ----
 
 # Install web dependencies

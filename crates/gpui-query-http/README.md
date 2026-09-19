@@ -67,6 +67,31 @@ let cache = HttpCache::new(ReqwestBackend::from_client(reqwest::Client::new()));
 let (body, policy, meta) = cache.fetch("https://example.test/data").await?;
 ```
 
+## WebAssembly
+
+The crate compiles for `wasm32-unknown-unknown` with the default feature set and with the `reqwest` feature — the same feature flags work on both targets. On wasm, `ReqwestBackend` runs on reqwest's browser-fetch backend and TLS is the browser's job; the `rustls-tls` feature that the `reqwest` feature enables for native use is inert there, so it is harmless to leave on.
+
+For custom backends, `HttpBackend::fetch` bounds its returned future with `MaybeSend` (exported at the crate root) instead of `Send`. On native targets `MaybeSend` is exactly `Send`, so an existing impl written with `+ Send` keeps compiling unchanged — no migration needed. Use `+ MaybeSend` only when a backend must compile on both native and wasm targets: on `wasm32`, browser-fetch futures (reqwest's included) are inherently `!Send` because they hold JS values, so a `+ Send` bound would not compile there.
+
+```rust
+use std::future::Future;
+use gpui_query_http::{BackendResponse, Conditionals, HttpBackend, MaybeSend};
+
+struct MyBackend;
+
+impl HttpBackend for MyBackend {
+    type Error = MyError;
+
+    fn fetch(
+        &self,
+        url: &str,
+        conditionals: Conditionals,
+    ) -> impl Future<Output = Result<BackendResponse, MyError>> + MaybeSend {
+        // perform the conditional GET ...
+    }
+}
+```
+
 ## Links
 
 - Website: <https://gpui-query.freeoxide.com>

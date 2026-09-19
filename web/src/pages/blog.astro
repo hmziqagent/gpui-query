@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
+import { blogIndexMeta } from "../lib/page-meta";
 
 // Replaces the frontmatter-only glob in lib/blog.ts with an Astro content
 // collection query. Posts are sorted newest-first (same as getAllBlogPosts).
@@ -8,9 +9,8 @@ const posts = (await getCollection("blog")).sort(
   (a, b) => b.data.date.getTime() - a.data.date.getTime()
 );
 
-const title = "Blog - gpui-query";
-const description =
-  "Deep dives on async state management for GPUI in Rust: cache policies, cooperative cancellation, and updates from the gpui-query project.";
+const title = `${blogIndexMeta.title} - gpui-query`;
+const description = blogIndexMeta.description;
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "Blog",
@@ -36,9 +36,9 @@ function formatDate(d: Date): string {
   <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-16 lg:px-8">
     <div class="mx-auto max-w-7xl">
       <div class="border-l-4 border-primary pl-5">
-        <h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Blog</h1>
+        <h1 class="text-3xl font-bold tracking-tight sm:text-4xl">{blogIndexMeta.title}</h1>
         <p class="mt-2 text-lg text-muted-foreground">
-          Announcements, deep dives, and updates about gpui-query.
+          {blogIndexMeta.subtitle}
         </p>
       </div>
 

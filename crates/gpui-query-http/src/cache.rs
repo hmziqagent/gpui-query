@@ -57,7 +57,7 @@ pub enum HttpError {
         /// The URL that produced the spurious `304`.
         url: String,
     },
-    /// A cache [`Mutex`](std::sync::Mutex) was poisoned by a panicking thread.
+    /// A cache [`Mutex`] was poisoned by a panicking thread.
     ///
     /// Rather than panicking the caller (the previous `.expect` behavior), the
     /// poison is surfaced as a typed error so a poisoned cache fails one
@@ -253,7 +253,7 @@ fn policy_from_meta(meta: &CacheMeta) -> CachePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{BackendResponse, Conditionals, HttpBackend};
+    use crate::backend::{BackendResponse, Conditionals, HttpBackend, MaybeSend};
     use bytes::Bytes;
     use http::HeaderMap;
     use std::collections::VecDeque;
@@ -295,7 +295,7 @@ mod tests {
             &self,
             _url: &str,
             _conditionals: Conditionals,
-        ) -> impl Future<Output = Result<BackendResponse, MockError>> + Send {
+        ) -> impl Future<Output = Result<BackendResponse, MockError>> + MaybeSend {
             // Count the call and pop the next canned response.
             let next = {
                 let mut calls = self.calls.lock().unwrap();

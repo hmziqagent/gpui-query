@@ -2,107 +2,23 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import LegalPage from "../components/LegalPage.astro";
 import LegalSection from "../components/LegalSection.astro";
+import { getLegalDoc } from "../lib/legal-content";
+import { renderInlineMarkdown } from "../lib/inline-md";
 
-const title = "Privacy Policy - gpui-query";
-const description =
-  "How the gpui-query website handles data: Firebase Analytics, Cloudflare hosting, self-hosted fonts, and local storage.";
+// Legal copy lives once in ../lib/legal-content (shared with the /privacy.md
+// and /privacy.txt alt-format generator). Here we only render it to HTML.
+const doc = getLegalDoc("privacy");
+const title = `${doc.title} - gpui-query`;
+const description = doc.description;
 ---
 <BaseLayout title={title} description={description} canonicalPath="/privacy">
-  <LegalPage
-    title="Privacy Policy"
-    description="How the gpui-query website handles analytics, hosting logs, fonts, and local storage."
-    updatedAt="July 9, 2026"
-  >
-    <LegalSection title="Scope">
-      <p>
-        This policy covers the gpui-query website at
-        <a href="https://gpui-query.freeoxide.com">gpui-query.freeoxide.com</a>, including the
-        documentation and blog. The site has no user accounts, no comment forms, and no newsletter.
-        We do not ask you for personal information anywhere on it. The data described below is what
-        the services we build on collect.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Analytics">
-      <p>
-        We use <strong>Firebase Analytics</strong> (part of Google Firebase, operated by Google LLC)
-        to understand how the site is used: which pages are visited, roughly where visitors come
-        from, and what kind of device and browser they use. Firebase collects this through a device
-        identifier and reports it to us only in aggregate. We use it only to see which docs pages
-        get traffic and where readers drop off.
-      </p>
-      <p>
-        Google's own use of this data is described in the
-        <a
-          href="https://firebase.google.com/support/privacy"
-          target="_blank"
-          rel="noopener noreferrer">Firebase privacy documentation</a
-        > and the
-        <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer"
-          >Google Privacy Policy</a
-        >. Most content blockers block Firebase Analytics; the site works exactly the same with it
-        blocked.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Hosting">
-      <p>
-        The site is served by <strong>Cloudflare</strong>. Like any web host, Cloudflare sees your IP
-        address and request details and keeps short-lived server logs for security and operations.
-        See the
-        <a
-          href="https://www.cloudflare.com/privacypolicy/"
-          target="_blank"
-          rel="noopener noreferrer">Cloudflare Privacy Policy</a
-        >.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Fonts">
-      <p>
-        Fonts are <strong>self-hosted</strong>: the font files are bundled with the site and served
-        from the same origin. No font request is sent to any third party, so your IP address is not
-        shared with a font provider.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Local storage">
-      <p>
-        Your light/dark theme choice is saved in your browser's <code>localStorage</code>. It never
-        leaves your device and you can clear it at any time through your browser settings.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="External links">
-      <p>
-        The site links out to GitHub, crates.io, docs.rs, and other third-party sites. Once you
-        follow one of those links, that site's privacy policy applies, not this one.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Children">
-      <p>
-        The site is developer documentation and is not directed to children under 13. We do not
-        knowingly collect any information from them.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Changes">
-      <p>
-        If we change what the site collects (for example by adding or removing a service), we will
-        update this page and the date at the top.
-      </p>
-    </LegalSection>
-
-    <LegalSection title="Contact">
-      <p>
-        Questions about this policy? Open an issue on
-        <a
-          href="https://github.com/freeoxide/gpui-query/issues"
-          target="_blank"
-          rel="noopener noreferrer">GitHub</a
-        > or email <a href="mailto:hmziqrs@gmail.com">hmziqrs@gmail.com</a>.
-      </p>
-    </LegalSection>
+  <LegalPage title={doc.title} description={doc.intro} updatedAt={doc.updatedAt}>
+    {doc.sections.map((section) => (
+      <LegalSection title={section.title}>
+        {section.paragraphs.map((p) => (
+          <p set:html={renderInlineMarkdown(p)} />
+        ))}
+      </LegalSection>
+    ))}
   </LegalPage>
 </BaseLayout>

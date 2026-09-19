@@ -21,6 +21,10 @@
 //! Each site repeats a short form of this rationale next to its `detach()`.
 
 use gpui::{BorrowAppContext as _, Context, Entity, Subscription};
+// Only the release-profile fallback below calls `AppContext::new`; importing
+// it unconditionally warns as unused in dev builds, hence the cfg gate.
+#[cfg(not(debug_assertions))]
+use gpui::AppContext as _;
 
 use crate::client::{QueryClient, QueryObserver};
 use crate::core::{Fetched, QueryFetchMode, QueryKey, QueryResource, QuerySignal, QueryStatus};

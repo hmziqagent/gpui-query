@@ -15,7 +15,9 @@ authors = ["hmziqrs"]
 default = []
 
 [dependencies]
-gpui-query = { path = "../gpui-query", default-features = false, features = ["persist", "client", "hook"] }
+# `version` is required alongside `path`: `cargo publish` strips the path
+# override and the published manifest must reference the crates.io release.
+gpui-query = { path = "../gpui-query", version = "0.2", default-features = false, features = ["persist", "client", "hook"] }
 dirs = "6"
 tempfile = "3"
 bincode = "1"
@@ -26,3 +28,7 @@ thiserror = "2"
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 pollster = "0.4"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

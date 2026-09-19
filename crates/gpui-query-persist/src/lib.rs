@@ -1,6 +1,6 @@
 //! Reference disk-based persistence adapter for [`gpui_query`].
 //!
-//! Provides [`FilePersister`], a [`Persister`](gpui_query::client::Persister)
+//! Provides [`FilePersister`], a [`Persister`]
 //! implementation that atomically writes a [`PersistSnapshot`] to disk and
 //! tolerantly loads it back, plus a [`NoopPersister`] for tests/disabled modes.
 //!

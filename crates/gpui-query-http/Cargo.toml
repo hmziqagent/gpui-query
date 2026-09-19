@@ -22,7 +22,9 @@ default = []
 reqwest = ["dep:reqwest"]
 
 [dependencies]
-gpui-query = { path = "../gpui-query", default-features = false, features = ["core"] }
+# `version` is required alongside `path`: `cargo publish` strips the path
+# override and the published manifest must reference the crates.io release.
+gpui-query = { path = "../gpui-query", version = "0.2", default-features = false, features = ["core"] }
 bytes = "1"
 http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
@@ -32,3 +34,10 @@ thiserror = "2"
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt"] }
+
+# Docs.rs convention (see AGENTS.md / main crate): render with every feature so
+# the `reqwest`-gated `reqwest_backend` module and its re-export appear; the
+# default-features render would leave dead intra-doc links to them.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

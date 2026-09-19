@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> Wasm32 compile support for `core` and `gpui-query-http`, publish fixes for the satellite crates, and real test coverage in CI.
+
+### Added
+
+#### `gpui-query` — wasm32 support for the `core` layer
+
+- The `core` layer builds for `wasm32-unknown-unknown`: on wasm targets `ahash` switches from runtime RNG to `compile-time-rng` internally (its `runtime-rng` default pulls `getrandom`, which cannot compile there), so no consumer configuration is needed. The `client`, `hook`, and `persist` layers stay native-only — they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+- The wasm support boundary is documented in the root and main-crate READMEs.
+
+#### `gpui-query-http` — wasm32 support, including the `reqwest` feature
+
+- The crate compiles for `wasm32-unknown-unknown` with the default feature set and with the `reqwest` feature — the same feature flags work on both targets. On wasm, `ReqwestBackend` runs on reqwest's browser-fetch backend and TLS is the browser's job.
+- `MaybeSend` marker alias for `Send`, relaxed to a no-op on `wasm32` (exported at the crate root): `HttpBackend::fetch` bounds its returned future with `MaybeSend` instead of `Send`. On native targets the bound is exactly `Send`, so existing `+ Send` backend impls keep compiling unchanged; on `wasm32` it drops the requirement, because browser-fetch futures (reqwest's included) are inherently `!Send` — they hold JS values.
+- The README gained a WebAssembly section showing how to write a backend that compiles on both native and wasm targets.
+
+#### CI — wasm compile guard
+
+- New "Wasm Check" workflow (plus a `just wasm-check` recipe mirroring it) builds the core-only main crate and the `http` satellite — with and without `reqwest` — for `wasm32-unknown-unknown`, then the native all-features build, on every push and pull request, so the wasm boundary cannot silently regress.
+
+### Changed
+
+- CI now runs `cargo test --all-features` on every push and pull request (new "Cargo Test" workflow). Previously every workflow was build-only and the full suite ran only locally via `just test`; the job installs the X11 link dependencies (`libx11-xcb-dev`, `libxkbcommon-x11-dev`) that GPUI-linked test binaries need.
+- Publish workflows' rust-cache override pointed at a member directory cargo never writes to, so target-dir caching never hit; the override is dropped in favor of the default workspace-root mapping. `gpui-query-legacy` keeps its mapping intentionally — it is excluded from the workspace and is its own workspace root.
+- The PR checks workflow now also validates changes to the sibling web deploy workflows (`deploy.yml`, `web-preview.yml`), which previously triggered no checks at all.
+
+### Fixed
+
+#### `gpui-query-http` — publish blocker and docs.rs metadata
+
+- The `gpui-query` dependency now carries `version = "0.2"` alongside its path: `cargo publish` strips path overrides, so the previously versionless dependency made the crate unpublishable.
+- docs.rs now renders with every feature and annotates `reqwest`-gated items with the feature that enables them, so `ReqwestBackend` and its module appear with live intra-doc links instead of dead ones.
+- Three redundant intra-doc link targets simplified; the rendered docs are unchanged and rustdoc's warnings are gone.
+
+#### `gpui-query-persist` — publish blocker and docs.rs metadata
+
+- Same publish blocker fixed: the `gpui-query` path dependency gains `version = "0.2"`, and `cargo publish --dry-run` now verifies the crate against the crates.io release.
+- Fleet-consistent docs.rs metadata added (`all-features = true`, `rustdoc-args = ["--cfg", "docsrs"]`); behaviorally a no-op today, as the crate has no optional features.
+- One redundant intra-doc link simplified.
+
+#### `gpui-query` — warning-free core-only builds
+
+- `core`-only builds no longer warn about the unused `last_updated_at_ms` accessor (only the `client` layer reads it).
+
+#### CI — release workflow guards
+
+- Changelog Release now fetches tags on checkout, so the "already released?" guard actually sees existing tags instead of always re-attempting the release.
+- The publish and web-deploy jobs run only when the guard decides a release should happen; merging CHANGELOG edits that do not cut a release (such as new `[Unreleased]` entries) no longer re-runs `cargo publish` or redeploys the website.
+
 ## [0.2.0] - 2026-07-21
 
 > Disk persistence, server-driven cache policy, and two new companion crates.

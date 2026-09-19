@@ -37,6 +37,8 @@ To use only the core state machine with no GPUI dependency:
 gpui-query = { version = "0.2.0", default-features = false, features = ["core"] }
 ```
 
+The `core` layer also builds for `wasm32-unknown-unknown` — the crate handles the wasm-specific setup internally (ahash switches to compile-time RNG on wasm targets), so no consumer configuration is needed. The `client`, `hook`, and `persist` layers are native-only: they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+
 ## quick start
 
 Set up the `QueryClient` as a GPUI global during app initialization:
@@ -260,6 +262,29 @@ Only `Success` entries with a registered serializer are persisted; the typed rou
 `PreparedFetch` holds an entity, request ID, and signal for imperative one-shot fetches that you complete manually.
 
 Garbage collection runs on idle resources older than `gc_time_ms` (default: 5 minutes). Configurable per-query via `QueryOptions::gc_time_ms()`.
+
+## claude code skills
+
+Two installable [Claude Code](https://claude.com/claude-code) skills ship in this repo under [`skills/`](./skills) — knowledge packs that teach an AI assistant the real gpui-query API (signatures, defaults, lifecycle, gotchas) so it writes correct hooks, caching, retry, and persistence code instead of guessing.
+
+- **`gpui-query`** — the essentials: `use_query` / `use_mutation` / `use_infinite_query` / `use_query_select`, in-memory `CachePolicy`, `RetryPolicy`, `QueryKey` filters, `QueryClient` bulk ops, observers, GC.
+- **`gpui-query-extensions`** — the satellites: HTTP `Cache-Control` → `CachePolicy` + `HttpCache` (`gpui-query-http`), and durable disk persistence with `FilePersister` + the `persist` feature (`gpui-query-persist`).
+
+Install both globally (available in every project), from a clone of the repo:
+
+```sh
+cp -R skills/gpui-query skills/gpui-query-extensions ~/.claude/skills/
+```
+
+Or grab a single skill without cloning:
+
+```sh
+mkdir -p ~/.claude/skills/gpui-query
+curl -fsSL https://raw.githubusercontent.com/freeoxide/gpui-query/master/skills/gpui-query/SKILL.md \
+  -o ~/.claude/skills/gpui-query/SKILL.md
+```
+
+Once installed, the skills activate automatically when you work on a GPUI app that depends on gpui-query — no manual invocation needed. See the [Claude Code skills guide](https://gpui-query.freeoxide.com/docs/guides/claude-skills) for details.
 
 ## links
 

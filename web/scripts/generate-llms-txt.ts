@@ -3,77 +3,60 @@
  * Generate llms.txt and llms-full.txt for AI agent optimization.
  * Follows the llmstxt.org specification.
  *
- * Source: Starlight docs at src/content/docs/docs (all .md and .mdx files).
+ * Source: the doc collection (src/content/docs/docs) via lib/pages.ts, which is
+ * the same loader the rendered Starlight pages and the per-page `.md`/`.txt`
+ * alternates use. Site-wide constants live once in lib/site.ts.
  *
- * Usage: node scripts/generate-llms-txt.ts [--output .output/public]
+ * Usage: node scripts/generate-llms-txt.ts [--output dist/client]
  */
 
 import { writeFile, mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import process from "node:process";
-import { loadDocs } from "./lib/docs-md.ts";
+import { loadDocIndex } from "./lib/pages.ts";
+import {
+  HEADER_LINES,
+  ALT_FORMAT_NOTE,
+  docIndexLines,
+  SITE_URL,
+  GITHUB_URL,
+} from "./lib/site.ts";
 
 const outputDir = process.argv.includes("--output")
   ? process.argv[process.argv.indexOf("--output") + 1]
   : "dist/client";
 
-// Scripts run from web/. Starlight docs live under src/content/docs/docs and
-// are served at /docs/** (route "" -> /docs/).
-const docsRoot = resolve("src", "content", "docs", "docs");
-const siteUrl = "https://gpui-query.freeoxide.com";
-
-const HEADER = [
-  "# gpui-query",
-  "",
-  "> Zero-boilerplate async state management for GPUI. Brings TanStack Query patterns to Rust and the Zed editor's GPUI framework with caching, retry, cooperative cancellation, and persistence.",
-  "",
-];
-
 async function main(): Promise<void> {
-  const parsed = await loadDocs(docsRoot);
-  if (parsed.length === 0) {
+  const docs = await loadDocIndex();
+  if (docs.length === 0) {
     console.log("No docs found, skipping llms.txt generation");
     return;
   }
 
-  const docs = parsed.map((doc) => ({
-    route: doc.route,
-    title: doc.frontmatter.title || doc.route || "Home",
-    description: doc.frontmatter.description || "",
-    order: Number(doc.frontmatter.sidebar_position ?? 0),
-    plain: doc.plain,
-  }));
-
-  // Stable ordering: by sidebar_position, then route.
-  docs.sort((a, b) => a.order - b.order || a.route.localeCompare(b.route));
-
   await mkdir(outputDir, { recursive: true });
 
   // --- llms.txt (summary, llmstxt.org) ---
-  const llmsLines = [...HEADER, "## Documentation", ""];
-
-  for (const doc of docs) {
-    const url = `${siteUrl}/docs/${doc.route}`;
-    const desc = doc.description ? `: ${doc.description}` : "";
-    // llmstxt.org: `- [Title](URL): Optional description`
-    llmsLines.push(`- [${doc.title}](${url})${desc}`);
-  }
-
-  llmsLines.push(
+  const llmsLines = [
+    ...HEADER_LINES,
+    "## Documentation",
+    "",
+    ...docIndexLines(docs),
+    "",
+    ALT_FORMAT_NOTE,
     "",
     "## Links",
     "",
-    "- [GitHub](https://github.com/freeoxide/gpui-query): Source code and issues",
-    "- [Introduction](https://gpui-query.freeoxide.com/docs/): What is gpui-query and why you need it",
-  );
+    `- [GitHub](${GITHUB_URL}): Source code and issues`,
+    `- [Introduction](${SITE_URL}/docs/): What is gpui-query and why you need it`,
+    "",
+  ];
 
   const llmsTxt = llmsLines.join("\n");
   await writeFile(join(outputDir, "llms.txt"), llmsTxt, "utf-8");
   console.log(`Generated llms.txt (${docs.length} docs, ${llmsTxt.split("\n").length} lines)`);
 
   // --- llms-full.txt (concatenated content) ---
-  const fullLines = [...HEADER];
-
+  const fullLines = [...HEADER_LINES];
   for (const doc of docs) {
     fullLines.push(`## ${doc.title}`, "");
     if (doc.description) {

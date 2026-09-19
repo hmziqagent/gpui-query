@@ -14,7 +14,7 @@
 
 use std::future::Future;
 
-use crate::backend::{BackendResponse, Conditionals, HttpBackend};
+use crate::backend::{BackendResponse, Conditionals, HttpBackend, MaybeSend};
 
 /// A [`HttpBackend`] backed by [`reqwest`].
 ///
@@ -44,11 +44,13 @@ impl HttpBackend for ReqwestBackend {
         &self,
         url: &str,
         conditionals: Conditionals,
-    ) -> impl Future<Output = Result<BackendResponse, reqwest::Error>> + Send {
-        // Build the request synchronously (no .await), then return a Send future
+    ) -> impl Future<Output = Result<BackendResponse, reqwest::Error>> + MaybeSend {
+        // Build the request synchronously (no .await), then return the future
         // for the send+collect half. Building eagerly here keeps the returned
-        // future `Send` even though `reqwest::RequestBuilder` itself is `!Send`
-        // in some configurations.
+        // future `Send` on native targets even though `reqwest::RequestBuilder`
+        // itself is `!Send` in some configurations. On wasm32 the future is
+        // `!Send` by design (reqwest's browser-fetch backend holds JS values),
+        // which the `MaybeSend` bound accommodates.
         let mut req = self.0.get(url);
         if let Some(etag) = conditionals.if_none_match {
             req = req.header(reqwest::header::IF_NONE_MATCH, etag);

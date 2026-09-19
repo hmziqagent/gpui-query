@@ -1,0 +1,49 @@
+name: Cargo Test
+
+# Runs the full workspace test suite on Linux — the local mirror is
+# `just test`. The GPUI-linked test binaries (client/hook/persist layers and
+# the persist satellite) need X11/XCB dev libraries at link time, so the two
+# zed script/linux display packages are installed first (libxkbcommon-dev and
+# libxcb1-dev arrive transitively). The wasm32 boundary stays build-only in
+# wasm-check.yml: the repo has no wasm test targets today and browser-driven
+# wasm-bindgen-test needs runner infrastructure that is not warranted.
+# Cargo.lock is not committed; rust-cache keys off the manifests that exist.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - ".github/workflows/**"
+      - "justfile"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - ".github/workflows/**"
+      - "justfile"
+
+concurrency:
+  group: cargo-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-xcb-dev libxkbcommon-x11-dev
+
+      # No `workspaces` override: the repo root is the workspace root, so the
+      # default "." already caches the workspace target dir (same rationale
+      # as wasm-check.yml; the working-directory trick is not needed here).
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run all tests
+        run: cargo test --all-features

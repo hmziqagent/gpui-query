@@ -1,6 +1,6 @@
 [package]
 name = "gpui-query"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "TanStack Query-inspired async state management for GPUI"
 repository = "https://github.com/freeoxide/gpui-query"
@@ -22,8 +22,17 @@ persist = ["client", "hook", "dep:serde_json", "dep:thiserror"]
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 thiserror = { version = "2", optional = true }
-ahash = { version = "0.8" }
 gpui = { workspace = true, optional = true }
+
+# ahash's default `runtime-rng` feature pulls getrandom, which hard-errors on
+# wasm32-unknown-unknown. The two declarations are mutually exclusive so the
+# native build keeps the default feature set (runtime-rng) while wasm uses
+# compile-time RNG.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ahash = { version = "0.8" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ahash = { version = "0.8", default-features = false, features = ["std", "compile-time-rng"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
