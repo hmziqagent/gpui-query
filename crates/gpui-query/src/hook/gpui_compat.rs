@@ -10,7 +10,7 @@ pub(crate) fn read_entity<T: 'static, R, C: gpui::AppContext>(
     f: impl FnOnce(&T, &gpui::App) -> R,
 ) -> Option<R> {
     let mut out: Option<R> = None;
-    let _ = entity.read_with(cx, |value, app| {
+    entity.read_with(cx, |value, app| {
         out = Some(f(value, app));
     });
     out

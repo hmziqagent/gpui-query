@@ -59,7 +59,7 @@ pub(super) async fn run_mutation_loop<V, T, E, F, Fut>(
                     .as_ref()
                     .is_some_and(needs_data)
                     .then(|| data.clone());
-                let _ = entity.update(cx, |resource, cx| {
+                entity.update(cx, |resource, cx| {
                     resource.complete_success(data);
                     resource.reset_retry_count();
                     cx.notify();
@@ -94,7 +94,7 @@ pub(super) async fn run_mutation_loop<V, T, E, F, Fut>(
                         fire_error_callbacks(&callbacks, &error_for_callback);
                         return;
                     };
-                    let _ = entity.update(cx, |resource, _cx| {
+                    entity.update(cx, |resource, _cx| {
                         resource.increment_retry();
                     });
 
@@ -113,14 +113,14 @@ pub(super) async fn run_mutation_loop<V, T, E, F, Fut>(
                         return;
                     }
 
-                    let _ = entity.update(cx, |resource, _cx| {
+                    entity.update(cx, |resource, _cx| {
                         resource.prepare_retry();
                     });
 
                     attempt += 1;
                 } else {
                     if let Some(entity) = weak.upgrade() {
-                        let _ = entity.update(cx, |resource, cx| {
+                        entity.update(cx, |resource, cx| {
                             resource.complete_failure(error);
                             resource.reset_retry_count();
                             cx.notify();

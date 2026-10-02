@@ -27,7 +27,9 @@ The crate pulls in [gpui-query](https://crates.io/crates/gpui-query) with the `p
 
 Hand a `FilePersister` to `QueryClient::persist_with` when your app starts. Keep the returned `PersistHandle` alive for as long as you want saves to continue.
 
-```rust,no_run
+```rust,ignore
+// `ignore` on the gpui-pre bridge only: the snapshot renames
+// Application::new to with_platform, which would not read upstream.
 use gpui::Application;
 # use gpui::BorrowAppContext;
 use gpui_query::client::{PersistOptions, QueryClient};

@@ -66,7 +66,7 @@ pub(super) async fn run_fetch_page_with_id<T, E, F, Fut>(
 
         match result {
             Ok((page, has_more)) => {
-                let _ = e.update(cx, |resource, cx| {
+                e.update(cx, |resource, cx| {
                     if let Some(guard) = resource.accept_current_request(request_id) {
                         resource.reset_retry_count();
                         resource.complete_success_with_guard(
@@ -105,11 +105,11 @@ pub(super) async fn run_fetch_page_with_id<T, E, F, Fut>(
                     if cancelled || !still_current {
                         return;
                     }
-                    let _ = e.update(cx, |resource, _cx| {
+                    e.update(cx, |resource, _cx| {
                         resource.increment_retry();
                     });
                 } else {
-                    let _ = e.update(cx, |resource, cx| {
+                    e.update(cx, |resource, cx| {
                         if let Some(guard) = resource.accept_current_request(request_id) {
                             resource.reset_retry_count();
                             resource.complete_failure_with_guard(guard, error);

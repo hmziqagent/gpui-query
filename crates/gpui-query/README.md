@@ -33,7 +33,9 @@ The `core` layer also builds for `wasm32-unknown-unknown`: the crate swaps ahash
 
 Set up a `QueryClient` as a GPUI global when your app starts:
 
-```rust,no_run
+```rust,ignore
+// `ignore` on the gpui-pre bridge only: the snapshot renames
+// Application::new to with_platform, which would not read upstream.
 use gpui::Application;
 # use gpui::BorrowAppContext;
 use gpui_query::QueryClient;

@@ -2,8 +2,6 @@
 //! two-phase `accept_current_request` protocol, and each task holds only a
 //! `WeakEntity`, so it self-terminates on entity drop.
 
-#[cfg(not(debug_assertions))]
-use gpui::AppContext as _;
 use gpui::{BorrowAppContext as _, Context, Entity, Subscription};
 // Only the release-profile fallback below calls `AppContext::new`; importing
 // it unconditionally warns as unused in dev builds, hence the cfg gate.
@@ -320,7 +318,7 @@ pub fn fetch_query_with_signal<T, E, C, F, Fut>(
         let now_ms = super::current_time_ms();
         let Some(entity) = weak.upgrade() else { return };
 
-        let _ = entity.update(cx, |resource, cx| {
+        entity.update(cx, |resource, cx| {
             if let Some(guard) = resource.accept_current_request(request_id) {
                 match result {
                     Ok(data) => {

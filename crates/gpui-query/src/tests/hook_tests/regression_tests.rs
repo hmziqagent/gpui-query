@@ -126,7 +126,7 @@ fn test_mutate_from_two_spawn_contexts_second_rejected(cx: &mut TestAppContext) 
     let _second_task = harness.update(cx, |_this, cx| {
         cx.spawn(async move |weak_self, async_cx| {
             if let Some(h) = weak_self.upgrade() {
-                let _ = h.update(async_cx, |this, cx| {
+                h.update(async_cx, |this, cx| {
                     let sc = sc.clone();
                     mutate(
                         &this.mutation,

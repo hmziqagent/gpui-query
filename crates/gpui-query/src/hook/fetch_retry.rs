@@ -125,7 +125,7 @@ async fn run_query_retry_loop<T, E, Out, F, Fut>(
                 let Some(e) = entity.upgrade() else {
                     return;
                 };
-                let _ = e.update(cx, |resource, cx| {
+                e.update(cx, |resource, cx| {
                     if let Some(guard) = resource.accept_current_request(request_id) {
                         resource.reset_retry_count();
                         resource.complete_success(guard, parts.data, now_ms);
@@ -168,7 +168,7 @@ async fn run_query_retry_loop<T, E, Out, F, Fut>(
                     if !request_still_active {
                         return;
                     }
-                    let _ = e.update(cx, |resource, _cx| {
+                    e.update(cx, |resource, _cx| {
                         resource.increment_retry();
                     });
                     if let Some(ref mut sig) = signal {
@@ -177,7 +177,7 @@ async fn run_query_retry_loop<T, E, Out, F, Fut>(
                 } else {
                     let Some(e) = entity.upgrade() else { return };
                     let failure_now_ms = current_time_ms();
-                    let _ = e.update(cx, |resource, cx| {
+                    e.update(cx, |resource, cx| {
                         if let Some(guard) = resource.accept_current_request(request_id) {
                             resource.reset_retry_count();
                             resource.complete_failure(guard, error, failure_now_ms);
