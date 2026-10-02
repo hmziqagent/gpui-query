@@ -1,19 +1,9 @@
 //! Error types for query operations.
-//!
-//! [`QueryError`] is the default error type for query resources. It implements
-//! [`std::fmt::Display`] and [`std::error::Error`] for ecosystem interop
-//! with `?` propagation and `anyhow`.
-//!
-//! # Security note
-//!
-//! Error messages passed to [`QueryError`] are stored verbatim and may appear
-//! in logs, DevTools diagnostics, and serialized output. Callers **must**
-//! sanitize server responses before constructing a `QueryError` to avoid
-//! leaking sensitive data (internal paths, credentials, auth tokens, etc.).
-//! Use [`QueryError::sanitized`] to redact known sensitive patterns.
+//! Messages are stored verbatim and may reach logs and serialized output;
+//! use [`QueryError::sanitized`] on server responses.
 
 mod convert;
-mod sanitize;
+pub(crate) mod sanitize;
 mod serde;
 mod types;
 

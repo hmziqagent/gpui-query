@@ -1,12 +1,6 @@
-//! Invalidate, cancelled count,
-//! two-phase protocol, is_current_request, and full lifecycle tests (sections 23-29).
-
 use crate::core::*;
 use crate::tests::core_lifecycle::transitions::*;
-
-// ═══════════════════════════════════════════════════════════════════════
-// 23. Invalidate: clears timestamp but keeps data and active request
-// ═══════════════════════════════════════════════════════════════════════
+use crate::tests::test_support::nocache_resource;
 
 #[test]
 fn invalidate_clears_timestamp_but_retains_data_and_active_request() {
@@ -28,18 +22,14 @@ fn invalidate_clears_timestamp_but_retains_data_and_active_request() {
     assert_eq!(r.last_updated_at_ms(), None, "invalidate clears timestamp");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 26. Multiple replacements: cancelled_count tracks all
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn cancelled_count_increments_on_each_replacement() {
     let mut r = resource();
     let mut s = seq();
 
-    let _ = begin(&mut r, &mut s, 100); // first
-    let _ = begin(&mut r, &mut s, 200); // replaces first
-    let _ = begin(&mut r, &mut s, 300); // replaces second
+    let _ = begin(&mut r, &mut s, 100);
+    let _ = begin(&mut r, &mut s, 200);
+    let _ = begin(&mut r, &mut s, 300);
 
     assert_eq!(r.cancelled_count(), 2, "two requests were replaced");
 }
@@ -54,10 +44,6 @@ fn cancelled_count_includes_explicit_cancel() {
 
     assert_eq!(r.cancelled_count(), 1);
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 27. Two-phase protocol: accept + complete via guard
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn accept_then_complete_success_via_guard() {
@@ -95,10 +81,6 @@ fn accept_then_complete_failure_via_guard() {
     assert_eq!(err_str(&r), Some("transport error: net error".to_string()));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 28. is_current_request
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn is_current_request_matches_active() {
     let mut r = resource();
@@ -112,38 +94,71 @@ fn is_current_request_matches_active() {
     assert!(r.is_current_request(rid2), "rid2 is current");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 29. Full lifecycle: Idle -> LoadingEmpty -> Success -> LoadingWithData
-//     -> Success (updated) -> LoadingWithData -> Cancel -> Rollback
-// ═══════════════════════════════════════════════════════════════════════
+#[test]
+fn complete_success_optional_none_yields_idle_some_yields_success() {
+    {
+        let mut r = nocache_resource("optional-none");
+        let mut s = seq();
+        let (rid, _) = begin(&mut r, &mut s, 100);
+        let guard = r.accept_current_request(rid).unwrap();
+        r.complete_success_optional(guard, None, 200);
+        assert_eq!(r.status(), QueryStatus::Idle, "None data => Idle");
+        assert!(r.data().is_none());
+        assert!(r.error().is_none());
+    }
+
+    {
+        let mut r = nocache_resource("optional-some");
+        let mut s = seq();
+        let (rid, _) = begin(&mut r, &mut s, 100);
+        let guard = r.accept_current_request(rid).unwrap();
+        r.complete_success_optional(guard, Some("data"), 200);
+        assert_eq!(r.status(), QueryStatus::Success);
+        assert_eq!(r.data(), Some(&"data"));
+    }
+}
+
+#[test]
+fn is_data_stale_by_status() {
+    let mut r = nocache_resource("stale-heuristic");
+    assert!(!r.is_data_stale(), "no data => not stale");
+
+    let mut s = seq();
+    let (rid, _) = begin(&mut r, &mut s, 100);
+    r.complete_current_success(rid, "data", 200);
+    assert!(!r.is_data_stale(), "Success with data => not stale");
+
+    let _ = begin(&mut r, &mut s, 300);
+    assert_eq!(r.status(), QueryStatus::LoadingWithData);
+    assert!(r.is_data_stale(), "LoadingWithData with data => stale");
+
+    let (rid2, _) = begin(&mut r, &mut s, 400);
+    r.complete_current_failure_with_data(rid2, "fallback", QueryError::response("err"), 500);
+    assert_eq!(r.status(), QueryStatus::Failure);
+    assert!(r.is_data_stale(), "Failure with data => stale");
+}
 
 #[test]
 fn full_lifecycle_round_trip() {
     let mut r = resource();
     let mut s = seq();
 
-    // Phase 1: Idle -> LoadingEmpty
     assert_eq!(r.status(), QueryStatus::Idle);
     let (rid1, status1) = begin(&mut r, &mut s, 100);
     assert_eq!(status1, QueryStatus::LoadingEmpty);
 
-    // Phase 2: LoadingEmpty -> Success
     assert!(r.complete_current_success(rid1, "v1", 200));
     assert_eq!(r.status(), QueryStatus::Success);
 
-    // Phase 3: Success -> LoadingWithData
     let (rid2, status2) = begin(&mut r, &mut s, 1_500);
     assert_eq!(status2, QueryStatus::LoadingWithData);
     assert_eq!(r.data(), Some(&"v1"));
 
-    // Phase 4: LoadingWithData -> Success (updated)
     assert!(r.complete_current_success(rid2, "v2", 1_600));
     assert_eq!(r.status(), QueryStatus::Success);
     assert_eq!(r.data(), Some(&"v2"));
     assert_eq!(r.previous_data(), Some(&"v1"));
 
-    // Phase 5: Success -> LoadingWithData -> Cancel
-    // Use t=3_000 which is beyond TTL (1_000ms from t=1_600)
     let (_rid3, _) = begin(&mut r, &mut s, 3_000);
     assert_eq!(r.status(), QueryStatus::LoadingWithData);
     assert!(r.cancel(QueryError::cancelled("manual")));
@@ -151,14 +166,108 @@ fn full_lifecycle_round_trip() {
     assert_eq!(r.data(), None);
     assert_eq!(r.previous_data(), Some(&"v2"));
 
-    // Phase 6: Rollback
     assert!(r.rollback_to_previous());
     assert_eq!(r.status(), QueryStatus::Success);
     assert_eq!(r.data(), Some(&"v2"));
 
-    // Phase 7: Full reset
     r.reset();
     assert_eq!(r.status(), QueryStatus::Idle);
     assert_eq!(r.data(), None);
     assert_eq!(r.cancelled_count(), 0);
+}
+
+#[test]
+fn data_epoch_counts_writes_not_value_changes() {
+    let mut r = resource();
+    assert_eq!(r.data_epoch(), 0);
+
+    r.set_data("v");
+    assert_eq!(r.data_epoch(), 1);
+    r.set_data("v");
+    assert_eq!(
+        r.data_epoch(),
+        2,
+        "equal-value overwrite still counts as a write"
+    );
+
+    r.clear_data();
+    assert_eq!(r.data_epoch(), 3);
+
+    assert!(r.rollback_to_previous());
+    assert_eq!(r.data_epoch(), 4);
+}
+
+#[test]
+fn data_epoch_bumps_on_success_and_failure_with_data_paths() {
+    let mut r = nocache_resource("epoch-completion");
+    let mut s = seq();
+
+    let (rid, _) = begin(&mut r, &mut s, 100);
+    r.complete_current_optional_success(rid, Some("a"), 200);
+    assert_eq!(r.data_epoch(), 1);
+
+    let (rid2, _) = begin(&mut r, &mut s, 300);
+    r.complete_current_failure_with_data(rid2, "b", QueryError::response("x"), 400);
+    assert_eq!(r.data_epoch(), 2);
+    assert_eq!(r.data(), Some(&"b"));
+}
+
+#[test]
+fn data_epoch_unchanged_by_failure_without_data() {
+    let mut r = nocache_resource("epoch-failure");
+    let mut s = seq();
+
+    let (rid, _) = begin(&mut r, &mut s, 100);
+    r.complete_current_failure(rid, QueryError::response("x"), 200);
+
+    assert_eq!(r.data_epoch(), 0);
+    assert_eq!(r.status(), QueryStatus::Failure);
+}
+
+#[test]
+fn data_epoch_bumps_when_cancel_or_reset_moves_data_out() {
+    let mut r = nocache_resource("epoch-cancel-reset");
+    let mut s = seq();
+
+    let (rid, _) = begin(&mut r, &mut s, 100);
+    assert!(r.complete_current_success(rid, "v", 200));
+    assert_eq!(r.data_epoch(), 1);
+
+    let (_rid2, _) = begin(&mut r, &mut s, 300);
+    assert!(r.cancel(QueryError::response("c")));
+    assert_eq!(r.data(), None);
+    assert_eq!(r.data_epoch(), 2);
+
+    assert!(r.rollback_to_previous());
+    assert_eq!(r.data(), Some(&"v"));
+    assert_eq!(r.data_epoch(), 3);
+
+    r.reset();
+    assert_eq!(r.data(), None);
+    assert_eq!(r.data_epoch(), 4);
+
+    r.reset();
+    assert_eq!(r.data_epoch(), 4, "reset without data is not a data write");
+}
+
+#[test]
+fn equality_ignores_the_data_epoch() {
+    let mut a = resource();
+    let mut s = seq();
+
+    let (rid, _) = begin(&mut a, &mut s, 100);
+    assert!(a.complete_current_success(rid, "v", 200));
+    let mut b = a.clone();
+    assert_eq!(a, b);
+
+    a.set_data("v");
+    assert!(a.rollback_to_previous());
+    assert_eq!(
+        a, b,
+        "a same-value write + rollback leaves equal observable state despite \
+         different data epochs"
+    );
+
+    b.set_data("w");
+    assert_ne!(a, b);
 }

@@ -1,15 +1,5 @@
-//! Tests for RequestId and RequestSequencer.
-//!
-//! Covers:
-//! - RequestId: construction, fields, ordering, label, equality
-//! - RequestSequencer: monotonicity, scope advancement, wrapping at u64::MAX
-
 use crate::core::{RequestId, RequestSequencer};
 use std::num::NonZero;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RequestId basics
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn request_id_scoped_accesses_scope_and_value() {
@@ -40,15 +30,9 @@ fn request_id_ordering_is_lexicographic() {
     let a = RequestId::scoped(NonZero::new(1).unwrap(), 100);
     let b = RequestId::scoped(NonZero::new(2).unwrap(), 1);
     let c = RequestId::scoped(NonZero::new(1).unwrap(), 200);
-    // scope is compared first
     assert!(a < b, "scope 1 < scope 2 regardless of sequence");
-    // same scope, sequence compared
     assert!(a < c, "scope 1 seq 100 < scope 1 seq 200");
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RequestSequencer monotonicity
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn sequencer_starts_at_scope_1_seq_1() {
@@ -97,22 +81,16 @@ fn sequencer_is_current_scope_tracks_scope_changes() {
     assert!(seq.is_current_scope(id_in_new_scope));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// RequestSequencer wrapping (u64::MAX → scope advance)
-// ═══════════════════════════════════════════════════════════════════════════
-
 #[test]
 fn sequencer_advances_scope_when_sequence_reaches_max() {
     let mut seq = RequestSequencer {
         scope_id: NonZero::new(5).unwrap(),
         next_request_id: u64::MAX,
     };
-    // This call should produce scope 5, seq u64::MAX and then advance scope.
     let id = seq.next_request();
     assert_eq!(id.scope_id(), NonZero::new(5).unwrap());
     assert_eq!(id.value(), u64::MAX);
 
-    // After advancing, the next id should be in scope 6, seq 1.
     let next_id = seq.next_request();
     assert_eq!(
         next_id.scope_id(),
@@ -132,12 +110,10 @@ fn sequencer_scope_id_wraps_to_1_on_overflow() {
         scope_id: NonZero::new(u64::MAX).unwrap(),
         next_request_id: u64::MAX,
     };
-    // First call returns (u64::MAX, u64::MAX) and then advances scope.
     let id = seq.next_request();
     assert_eq!(id.scope_id(), NonZero::new(u64::MAX).unwrap());
     assert_eq!(id.value(), u64::MAX);
 
-    // scope_id.checked_add(1) overflows -> wraps to 1
     let next_id = seq.next_request();
     assert_eq!(
         next_id.scope_id(),

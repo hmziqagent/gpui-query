@@ -79,19 +79,19 @@ let (entity, _sub) = use_mutation(
 );
 ```
 
-## 5. `use_mutation_with_options` is deprecated
+## 5. Mutation options moved into `use_mutation`
 
-`use_mutation_with_options(options, cx)` is deprecated since `0.2.0`. It now delegates to `use_mutation`, which accepts `MutationOptions` via `Into`. Replace it:
+The old options-taking mutation hook, deprecated in `0.2.0`, has been removed. `use_mutation` accepts `MutationOptions` via `Into`, so one hook covers both shapes:
 
 ```rust
-// v1
-// let (entity, sub) = use_mutation_with_options(&opts, cx);
-
-// v2
+// with options
 let (entity, sub) = use_mutation(opts, cx);
+
+// with defaults (no retries, 5 minute GC)
+let (entity, sub) = use_mutation((), cx);
 ```
 
-The deprecated function is retained (and still works) so existing callers compile, but it is no longer re-exported from the crate root. Move off it to clear the deprecation warning.
+If you were still on the deprecated hook, switch to the `opts` form above; the call reads the same and nothing else changes.
 
 ## 6. Bound infinite queries with max_pages
 

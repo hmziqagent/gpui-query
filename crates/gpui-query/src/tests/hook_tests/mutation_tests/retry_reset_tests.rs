@@ -1,5 +1,3 @@
-//! Tests for mutation retry behavior, reset, custom retry policy, and concurrent callback rejection.
-
 use std::sync::{Arc, Mutex};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
@@ -90,7 +88,6 @@ fn test_mutation_reset_clears_state(cx: &mut TestAppContext) {
         assert_eq!(resource.data(), Some(&"reset-result".to_string()));
     });
 
-    // Reset the mutation in a separate update to avoid borrow conflict.
     let mutation = cx.update(|cx| harness.read(cx).mutation.clone());
     cx.update(|cx| {
         mutation.update(cx, |m, _| {
@@ -139,9 +136,6 @@ fn test_mutate_with_callbacks_rejects_concurrent(cx: &mut TestAppContext) {
     let settled_count = Arc::new(Mutex::new(0u32));
     let sc = settled_count.clone();
 
-    // Gate: the first mutation blocks until the test releases it after issuing
-    // the second concurrent mutate_with_callbacks call. Uses the shared `Gate`
-    // helper which polls the executor with 1ms timers instead of thread::sleep.
     let gate = Gate::new();
     let gate_clone = gate.clone();
     let executor = cx.background_executor.clone();
@@ -162,8 +156,6 @@ fn test_mutate_with_callbacks_rejects_concurrent(cx: &mut TestAppContext) {
                 let gate_clone = gate_clone.clone();
                 let executor = executor.clone();
                 async move {
-                    // Wait for the gate via the shared helper. This allows
-                    // the second mutation call to be scheduled while we wait.
                     gate_clone.wait(&executor).await;
                     Ok::<_, QueryError>("first-result".to_string())
                 }
@@ -174,7 +166,6 @@ fn test_mutate_with_callbacks_rejects_concurrent(cx: &mut TestAppContext) {
             cx,
         );
 
-        // Second concurrent call should be rejected.
         mutate_with_callbacks(
             &entity,
             "second".to_string(),
@@ -186,7 +177,6 @@ fn test_mutate_with_callbacks_rejects_concurrent(cx: &mut TestAppContext) {
         H { mutation: entity }
     });
 
-    // Release the gate so the first mutation can complete.
     gate.release();
 
     cx.run_until_parked();

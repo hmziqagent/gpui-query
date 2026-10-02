@@ -1,105 +1,56 @@
-//! The `use_infinite_query` hook — ergonomic infinite scrolling / pagination
-//! for GPUI components.
-//!
-//! # v2 Improvements
-//!
-//! - Signal is properly cancelled when a page fetch replaces an in-flight request
-//! - `max_pages` defaults to `Some(50)` to prevent unbounded memory growth
-//! - Uses `InfiniteQueryObserver` for status-deduplication (avoids unnecessary re-renders)
-//! - `RequestSequencer` is persistent per resource (via `QueryClient` bucket)
-//! - `RequestId` is captured from `begin_fetch_next` and passed through to completion
-//! - Uses two-phase completion protocol (`accept_current_request` + guard)
-//! - `fetch_next` closure actually triggers a fetch (no longer a no-op stub)
-//! - Retry policy is stored on the entity and applied consistently to all page fetches
-//! - Entity is registered with `QueryClient` for shared caching and GC
-//!
-//! # Audit 3 fixes
-//!
-//! - **#1**: Removed `cx.notify()` from retry-wait branches in fetch runners (status
-//!   stays Loading during retries, so InfiniteQueryObserver deduplicates anyway)
-//! - **#2**: Removed unconditional `cx.notify()` from `fetch_next_page_infinite` and
-//!   `fetch_previous_page_infinite` before fetch completes
-//! - **#3**: Read page data by reference inside entity update closure instead of cloning
-//! - **#4/#6/#8/#9**: Use `QueryClient::next_request_id_for_infinite_key` for persistent
-//!   sequencers instead of creating transient ones per call
-//! - **#5**: Use match-based fallback for `InfiniteQueryObserver::observe` instead of
-//!   `expect()` to avoid production panics
-//! - **#7**: Check signal cancellation after retry delay to avoid retrying cancelled fetches
-//! - **#10**: Store `retry_policy` on entity, read it in fetch helpers instead of using
-//!   `RetryPolicy::default()`
-//! - **#12**: Removed the no-op stub `fetch_next` closure from the return type
-//!
-//! # Usage
-//!
-//! ```no_run
-//! use gpui_query::hook::{use_infinite_query, fetch_next_page_infinite, InfiniteQueryOptions};
-//! use gpui_query::QueryKey;
-//! # #[derive(Clone)]
-//! # struct Post { id: u64 }
-//! # #[derive(Clone, Debug)]
-//! # struct MyError;
-//!
-//! struct FeedView {
-//!     feed: gpui::Entity<gpui_query::InfiniteQueryResource<Vec<Post>, MyError>>,
-//!     _subscription: gpui::Subscription,
-//! }
-//!
-//! impl FeedView {
-//!     fn new(cx: &mut gpui::Context<Self>) -> Self {
-//!         let (entity, _subscription) = use_infinite_query(
-//!             InfiniteQueryOptions::new(QueryKey::from(["feed"])),
-//!             |last_page| async move {
-//!                 // Your async fetcher here
-//!                 Ok((vec![], false))
-//!             },
-//!             cx,
-//!         );
-//!         Self { feed: entity, _subscription }
-//!     }
-//!
-//!     fn on_scroll_to_bottom(&mut self, cx: &mut gpui::Context<Self>) {
-//!         fetch_next_page_infinite(
-//!             &self.feed,
-//!             |last_page| async move {
-//!                 // Your async fetcher here
-//!                 Ok((vec![], false))
-//!             },
-//!             cx,
-//!         );
-//!     }
-//! }
-//! ```
+//! `use_infinite_query` hook; the fetcher receives `Option<&T>` (the last
+//! page, if any) and returns `(T, bool)`, where the bool says whether more
+//! pages exist.
 
 use gpui::{AppContext as _, BorrowAppContext as _, Context, Entity, Subscription};
 
 use crate::client::{InfiniteQueryObserver, QueryClient};
 use crate::core::{InfiniteQueryResource, QueryStatus};
 
-use super::fetch_runners::run_fetch_next_page_with_id;
-use crate::hook::current_time_ms;
+use super::fetch_helpers::spawn_page_fetch;
+use super::fetch_runners::PageDirection;
 use crate::hook::options::InfiniteQueryOptions;
 
-// ── Hook ─────────────────────────────────────────────────────────────────
-
-/// Hook for infinite scrolling / pagination.
+/// The observer dedupes on status, so retry ticks do not re-render; the options' retry policy applies to every page fetch.
 ///
-/// Creates an [`InfiniteQueryResource`] entity and subscribes to it so the
-/// component re-renders on state changes. Returns:
+/// # Example
 ///
-/// 1. The entity holding the page data
-/// 2. The subscription (store to keep the observation alive)
+/// ```no_run
+/// use gpui_query::hook::{use_infinite_query, fetch_next_page_infinite, InfiniteQueryOptions};
+/// use gpui_query::QueryKey;
+/// # #[derive(Clone)]
+/// # struct Post { id: u64 }
+/// # #[derive(Clone, Debug)]
+/// # struct MyError;
 ///
-/// The fetcher receives `Option<&T>` (the last page, if any) and must return
-/// `Result<(T, bool), E>` where `T` is the new page data and `bool` indicates
-/// whether more pages exist.
+/// struct FeedView {
+///     feed: gpui::Entity<gpui_query::InfiniteQueryResource<Vec<Post>, MyError>>,
+///     _subscription: gpui::Subscription,
+/// }
 ///
-/// # v2 Notes
+/// impl FeedView {
+///     fn new(cx: &mut gpui::Context<Self>) -> Self {
+///         let (entity, _subscription) = use_infinite_query(
+///             InfiniteQueryOptions::new(QueryKey::from(["feed"])),
+///             |last_page| async move {
+///                 Ok((vec![], false))
+///             },
+///             cx,
+///         );
+///         Self { feed: entity, _subscription }
+///     }
 ///
-/// - `max_pages` defaults to `Some(50)` via [`InfiniteQueryOptions`].
-/// - The signal is properly cancelled when a new fetch replaces an in-flight request.
-/// - `InfiniteQueryObserver` provides status-deduplication to avoid unnecessary re-renders.
-/// - The entity is registered with [`QueryClient`] for shared caching and GC.
-/// - The retry policy from options is stored on the entity and used for all page fetches.
+///     fn on_scroll_to_bottom(&mut self, cx: &mut gpui::Context<Self>) {
+///         fetch_next_page_infinite(
+///             &self.feed,
+///             |last_page| async move {
+///                 Ok((vec![], false))
+///             },
+///             cx,
+///         );
+///     }
+/// }
+/// ```
 pub fn use_infinite_query<T, E, C, FNext, Fut>(
     options: InfiniteQueryOptions,
     fetch_next: FNext,
@@ -121,8 +72,6 @@ where
         ..
     } = options;
 
-    // #fix #8/#9: Route entity creation through QueryClient for shared
-    // caching, GC, and participation in bulk operations (invalidate/reset/remove).
     let entity = if cx.has_global::<QueryClient>() {
         cx.update_global::<QueryClient, _>(|client, cx| {
             client.infinite_resource_with_policies::<T, E>(key, cache_policy, request_policy, cx)
@@ -136,89 +85,29 @@ where
                  Call cx.set_global(QueryClient::new()) in your app setup."
             );
         }
-        cx.new(|_| {
-            // Audit H12: max_pages is NOT set here — the unconditional
-            // entity.update below already applies it for both QueryClient and
-            // standalone entities, so setting it here was redundant on the
-            // standalone path.
-            InfiniteQueryResource::new(key, cache_policy, request_policy)
-        })
+        cx.new(|_| InfiniteQueryResource::new(key, cache_policy, request_policy))
     };
 
-    // Audit fix #117: Apply max_pages (QueryClient-created entities don't set it)
-    // and store the retry policy on the entity in a single update + notify pass.
-    // #fix #10: the retry policy is stored on the entity so that
-    // fetch_next_page_infinite / fetch_previous_page_infinite can read it
-    // from the entity instead of using RetryPolicy::default().
     entity.update(cx, |resource, cx| {
         if let Some(max) = max_pages {
             resource.set_max_pages(Some(max));
         }
-        // Audit H13: clone for the entity store; the original local is reused
-        // in the initial-fetch spawn below (avoids the re-read + second clone
-        // that previously happened at the spawn site).
-        resource.set_retry_policy(retry_policy.clone());
+        resource.set_retry_policy(retry_policy);
         cx.notify();
     });
 
-    // #fix #7/#11: Use InfiniteQueryObserver for status deduplication instead
-    // of a raw cx.observe that fires on every entity mutation.
     let observer = InfiniteQueryObserver::new(&entity);
 
-    // #fix #5: Use match-based fallback instead of expect() to avoid production
-    // panics. Mirrors the pattern used in use_query_manual.
     let Some(subscription) = observer.observe(cx) else {
-        #[cfg(debug_assertions)]
-        panic!(
-            "InfiniteQueryObserver::observe failed: entity was just created and \
-             cannot be dropped. This indicates a GPUI internal regression."
+        debug_assert!(
+            false,
+            "InfiniteQueryObserver::observe failed: entity was just created and cannot be dropped"
         );
-        #[cfg(not(debug_assertions))]
-        {
-            // Audit fix #5 / H10: silently fall back to a no-op subscription in
-            // release builds (matching use_query_manual and use_mutation); the
-            // eprintln! was inconsistent with the rest of the hook layer.
-            return (entity, Subscription::new(|| {}));
-        }
+        return (entity, Subscription::new(|| {}));
     };
 
-    // Start the initial fetch if idle
-    let should_fetch = entity.read_with(cx, |r, _| r.status() == QueryStatus::Idle);
-    if should_fetch {
-        // #fix: Use the bucket's persistent sequencer via QueryClient so
-        // RequestIds are monotonic across the resource lifetime. The
-        // pre-allocated ID is passed through to begin_fetch_next_with_id so
-        // the resource's active_request_id matches the bucket's counter.
-        let maybe_request_id = if cx.has_global::<QueryClient>() {
-            let key = entity.read_with(cx, |r, _| r.key().clone());
-            cx.update_global::<QueryClient, _>(|client, _| {
-                client.next_request_id_for_infinite_key::<T, E>(&key)
-            })
-        } else {
-            None
-        };
-
-        // Pass the pre-allocated ID (or None) directly into
-        // begin_fetch_next_with_id, which uses it instead of creating
-        // a separate transient sequencer.
-        let request_id = entity.update(cx, |resource, _| {
-            let now_ms = current_time_ms();
-            resource.begin_fetch_next_with_id(maybe_request_id, now_ms)
-        });
-
-        if let Some(request_id) = request_id {
-            let weak = entity.downgrade();
-            let fetcher = fetch_next;
-            // Audit H13: reuse the retry_policy local set above instead of
-            // re-reading + re-cloning from the entity.
-            let retry = retry_policy.clone();
-            let task: gpui::Task<()> = cx.spawn(async move |_this, cx| {
-                run_fetch_next_page_with_id(&weak, &fetcher, request_id, &retry, cx).await;
-            });
-            // Audit fix #6: store the task so a replacement fetch (or entity
-            // drop on unmount) aborts the prior in-flight initial fetch.
-            entity.update(cx, |r, _| r.set_current_task(task));
-        }
+    if entity.read_with(cx, |r, _| r.status() == QueryStatus::Idle) {
+        spawn_page_fetch(&entity, fetch_next, PageDirection::Next, cx);
     }
 
     (entity, subscription)

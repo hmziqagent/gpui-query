@@ -11,39 +11,32 @@ A mutation does not touch the query cache on its own. If you need to invalidate 
 ## `use_mutation`
 
 ```rust
-pub fn use_mutation<V, T, E, C>(cx: &mut Context<C>) -> Entity<MutationResource<V, T, E>>
+pub fn use_mutation<V, T, E, C>(
+    options: impl Into<MutationOptions>,
+    cx: &mut Context<C>,
+) -> (Entity<MutationResource<V, T, E>>, Subscription)
 ```
 
-Creates a new `MutationResource` entity and returns it. The entity starts in the `Idle` state with a no-retry policy. Store it on your view struct and read from it during render to show loading spinners, error messages, or success state.
+Creates a new `MutationResource` entity and returns it together with the `Subscription` that keeps its observer alive; store both on your view struct. The entity starts in the `Idle` state configured from the options: pass `()` for the defaults (no retries, 5 minute GC) or a `MutationOptions` to change them. Read from the entity during render to show loading spinners, error messages, or success state.
 
 ```rust
+use gpui::{Entity, Subscription};
 use gpui_query::{use_mutation, MutationResource};
 
 struct UserForm {
     create_user: Entity<MutationResource<NewUser, User>>,
+    _mutation_sub: Subscription,
 }
 
 impl UserForm {
     fn new(cx: &mut Context<Self>) -> Self {
-        Self {
-            create_user: use_mutation(cx),
-        }
+        let (create_user, _mutation_sub) = use_mutation((), cx);
+        Self { create_user, _mutation_sub }
     }
 }
 ```
 
 The returned entity is a GPUI `Entity`, so you observe it like any other entity: call `entity.read(cx)` to inspect status, data, and error fields during render.
-
-### `use_mutation_with_options`
-
-```rust
-pub fn use_mutation_with_options<V, T, E, C>(
-    options: &MutationOptions<V, T, E>,
-    cx: &mut Context<C>,
-) -> Entity<MutationResource<V, T, E>>
-```
-
-Same as `use_mutation` but accepts a `MutationOptions` to configure retry policy and garbage collection time. See the `MutationOptions` section below.
 
 ## `mutate`
 
@@ -153,7 +146,7 @@ The core state container for a single mutation. Three type parameters:
 Every mutation goes through these states in order:
 
 1. **Idle**: initial state. No mutation has been triggered.
-2. **Loading**: `begin(variables, now_ms)` was called. The variables are stored, the error is cleared, and a fresh cancellation signal is created.
+2. **Loading**: `begin(variables)` was called. The variables are stored, the error is cleared, and a fresh cancellation signal is created.
 3. **Success** or **Failure**: the async task completes. `complete_success(data)` stores the result and clears the error. `complete_failure(error)` stores the error and increments the retry counter.
 
 If the entity has a retry policy and retries remain after a failure, the internal loop calls `retry()` to transition back to `Loading` and runs the mutator again.
@@ -167,8 +160,9 @@ If the entity has a retry policy and retries remain after a failure, the interna
 | `error()` | `Option<&E>` | Most recent error |
 | `variables()` | `Option<&V>` | Current or most recent variables |
 | `retry_count()` | `u32` | How many retries have been attempted |
+| `cancelled_count()` | `u64` | How many times this mutation has been cancelled |
 | `retry_policy()` | `&RetryPolicy` | The retry policy for this resource |
-| `created_at()` | `u64` | Timestamp (ms) of the last `begin` call, or 0 |
+| `set_retry_policy(policy)` | `()` | Replaces the retry policy for this resource |
 | `signal()` | `Option<&QuerySignal>` | The cancellation signal, if the mutation is in flight |
 | `key()` | `Option<&QueryKey>` | Optional query key for cache correlation |
 
@@ -178,7 +172,7 @@ If the entity has a retry policy and retries remain after a failure, the interna
 
 ### Methods
 
-**`begin(variables, now_ms)`** transitions to `Loading`. Stores the variables, clears any previous error, records the timestamp, and creates a fresh `QuerySignal`.
+**`begin(variables)`** transitions to `Loading`. Stores the variables, clears any previous error and the GC timestamp, resets the retry count, and creates a fresh `QuerySignal`.
 
 **`complete_success(data)`** transitions to `Success`. Stores the result data and clears the signal.
 
@@ -188,7 +182,7 @@ If the entity has a retry policy and retries remain after a failure, the interna
 
 **`retry() -> bool`** attempts to transition from `Failure` back to `Loading`. Only succeeds when `should_retry()` is `true` and the current status is `Failure`. Preserves the original variables and creates a fresh signal. Returns `true` if the retry was initiated.
 
-**`cancel(error)`** forces the mutation into `Failure` with the given error. Cancels the signal so any in-flight async work can observe it.
+**`cancel(error)`** forces the mutation into `Failure` with the given error. Clears any stored data and cancels the signal so in-flight async work can observe it.
 
 **`reset()`** returns the resource to `Idle` and clears everything: data, error, variables, retry count, signal, and timestamp.
 
@@ -207,9 +201,9 @@ pub enum MutationStatus {
 
 Each variant has a `label()` method returning a `&'static str` (`"Idle"`, `"Loading"`, `"Success"`, `"Failure"`).
 
-## `MutationOptions<V, T, E>`
+## `MutationOptions`
 
-Configuration struct passed to `use_mutation_with_options`.
+Options `use_mutation` accepts through `Into`: pass `()` for the defaults in the table, or build a custom set and hand it to `use_mutation(opts, cx)`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -221,9 +215,9 @@ Builder methods:
 ```rust
 use gpui_query::{MutationOptions, RetryPolicy};
 
-let opts: MutationOptions<NewUser, User> = MutationOptions::new()
+let opts = MutationOptions::default()
     .retry_policy(RetryPolicy::new(3).with_exponential_backoff())
-    .gc_time_ms(10 * 60 * 1_000); // 10 minutes
+    .gc_time(10 * 60 * 1_000); // 10 minutes
 ```
 
 ## `MutationCallbacks<T, E>`
@@ -255,7 +249,7 @@ Callbacks fire on the final outcome only. Intermediate retry attempts do not tri
 
 ## `RetryPolicy`
 
-Shared between queries and mutations. See the [Queries](/docs/api/queries) page for the full reference. The defaults for mutations differ: `use_mutation` creates a resource with `RetryPolicy::no_retries()`, while `MutationOptions::new()` also defaults to no retries.
+Shared between queries and mutations. See the [Queries](/docs/api/queries) page for the full reference. The defaults for mutations differ: `use_mutation` creates a resource with `RetryPolicy::no_retries()`, while `MutationOptions::default()` also defaults to no retries.
 
 To add retries:
 
@@ -277,7 +271,7 @@ let policy = RetryPolicy::new(3)
 A complete example of a view that creates a user and invalidates the user list on success:
 
 ```rust
-use gpui::{Context, Entity, View};
+use gpui::{Context, Entity, Subscription, View};
 use gpui_query::{
     use_mutation, mutate_with_callbacks,
     MutationCallbacks, MutationResource,
@@ -285,13 +279,13 @@ use gpui_query::{
 
 struct UserForm {
     create_user: Entity<MutationResource<NewUser, User>>,
+    _mutation_sub: Subscription,
 }
 
 impl UserForm {
     fn new(cx: &mut Context<Self>) -> Self {
-        Self {
-            create_user: use_mutation(cx),
-        }
+        let (create_user, _mutation_sub) = use_mutation((), cx);
+        Self { create_user, _mutation_sub }
     }
 
     fn handle_submit(&mut self, name: String, cx: &mut Context<Self>) {

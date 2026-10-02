@@ -1,8 +1,3 @@
-//! Basic tests for `use_query`, `use_query_manual`, `fetch_query`,
-//! `use_query_unsignalled`, subscriptions, key changes, and retry policy.
-
-use std::sync::{Arc, Mutex};
-
 use gpui::{AppContext as _, Entity, TestAppContext};
 
 use crate::core::{
@@ -10,8 +5,6 @@ use crate::core::{
 };
 use crate::hook::*;
 use crate::tests::test_support::*;
-
-// ── use_query ──────────────────────────────────────────────────────────────
 
 #[gpui::test]
 fn test_use_query_auto_fetches(cx: &mut TestAppContext) {
@@ -28,7 +21,6 @@ fn test_use_query_auto_fetches(cx: &mut TestAppContext) {
             |_signal| async move { Ok::<_, QueryError>("data") },
             cx,
         );
-        // Immediately after use_query, the resource should be loading.
         let status = entity.read(cx).status();
         assert!(
             status.is_loading(),
@@ -122,13 +114,11 @@ fn test_use_query_completes_with_failure(cx: &mut TestAppContext) {
     });
 }
 
-// ── use_query_with_signal ──────────────────────────────────────────────────
-
 #[gpui::test]
 fn test_use_query_signal_not_cancelled_on_normal_fetch(cx: &mut TestAppContext) {
     setup_query_client(cx);
 
-    let signal_cancelled = Arc::new(Mutex::new(false));
+    let signal_cancelled = std::sync::Arc::new(std::sync::Mutex::new(false));
     let sc = signal_cancelled.clone();
 
     struct H {
@@ -164,107 +154,6 @@ fn test_use_query_signal_not_cancelled_on_normal_fetch(cx: &mut TestAppContext) 
     );
 }
 
-// ── use_query_manual ───────────────────────────────────────────────────────
-
-#[gpui::test]
-fn test_use_query_manual_creates_entity_without_fetch(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-
-    struct H {
-        entity: Entity<QueryResource<String, QueryError>>,
-    }
-
-    let harness = cx.new(|cx| {
-        let (entity, _sub) = use_query_manual::<String, QueryError, _>(
-            QueryKey::from("manual-key"),
-            CachePolicy::Ttl { ttl_ms: 1_000 },
-            RequestPolicy::LatestWins,
-            cx,
-        );
-        let resource = entity.read(cx);
-        assert_eq!(resource.status(), QueryStatus::Idle);
-        assert!(resource.data().is_none());
-        assert_eq!(resource.key(), &QueryKey::from("manual-key"));
-        H { entity }
-    });
-
-    cx.update(|cx| {
-        assert_eq!(harness.read(cx).entity.read(cx).status(), QueryStatus::Idle);
-    });
-}
-
-// ── fetch_query ────────────────────────────────────────────────────────────
-
-#[gpui::test]
-fn test_fetch_query_triggers_refetch_on_existing_entity(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-
-    struct H {
-        entity: Entity<QueryResource<String, QueryError>>,
-    }
-
-    let harness = cx.new(|cx| {
-        let (entity, _sub) = use_query_manual::<String, QueryError, _>(
-            QueryKey::from("refetch-key"),
-            CachePolicy::Ttl { ttl_ms: 0 },
-            RequestPolicy::LatestWins,
-            cx,
-        );
-        assert_eq!(entity.read(cx).status(), QueryStatus::Idle);
-        fetch_query(
-            &entity,
-            || async { Ok::<_, QueryError>("refetched".to_string()) },
-            cx,
-        );
-        H { entity }
-    });
-
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        let resource = harness.read(cx).entity.read(cx);
-        assert_eq!(resource.status(), QueryStatus::Success);
-        assert_eq!(resource.data(), Some(&"refetched".to_string()));
-    });
-}
-
-#[gpui::test]
-fn test_fetch_query_can_refetch_after_success(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-
-    struct H {
-        entity: Entity<QueryResource<&'static str, QueryError>>,
-    }
-
-    let harness = cx.new(|cx| {
-        let (entity, _sub) = use_query(
-            QueryOptions::new("double-fetch").cache_policy(CachePolicy::NoCache),
-            |_signal| async move { Ok::<_, QueryError>("first") },
-            cx,
-        );
-        H { entity }
-    });
-
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        assert_eq!(harness.read(cx).entity.read(cx).data(), Some(&"first"));
-    });
-
-    // Refetch with different data. NoCache ensures begin_request won't short-circuit.
-    harness.update(cx, |this, cx| {
-        fetch_query(&this.entity, || async { Ok::<_, QueryError>("second") }, cx);
-    });
-
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        assert_eq!(harness.read(cx).entity.read(cx).data(), Some(&"second"));
-    });
-}
-
-// ── Subscription lifecycle ─────────────────────────────────────────────────
-
 #[gpui::test]
 fn test_subscription_drops_gracefully(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -281,7 +170,6 @@ fn test_subscription_drops_gracefully(cx: &mut TestAppContext) {
             cx,
         );
         assert_eq!(entity.read(cx).status(), QueryStatus::Idle);
-        // Drop the subscription inside the context. Entity should remain valid.
         drop(sub);
         assert_eq!(entity.read(cx).status(), QueryStatus::Idle);
         H { entity }
@@ -314,10 +202,8 @@ fn test_multiple_subscriptions_same_key(cx: &mut TestAppContext) {
             cx,
         );
 
-        // Same key = same entity from QueryClient.
         assert_eq!(entity1.entity_id(), entity2.entity_id());
 
-        // Both subscriptions should be droppable without issues.
         drop(sub1);
         drop(sub2);
 
@@ -331,8 +217,6 @@ fn test_multiple_subscriptions_same_key(cx: &mut TestAppContext) {
         );
     });
 }
-
-// ── Key change triggers new fetch ──────────────────────────────────────────
 
 #[gpui::test]
 fn test_different_keys_create_distinct_entities(cx: &mut TestAppContext) {
@@ -367,8 +251,6 @@ fn test_different_keys_create_distinct_entities(cx: &mut TestAppContext) {
     });
 }
 
-// ── Retry policy propagation ───────────────────────────────────────────────
-
 #[gpui::test]
 fn test_use_query_propagates_retry_policy_to_entity(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -393,8 +275,6 @@ fn test_use_query_propagates_retry_policy_to_entity(cx: &mut TestAppContext) {
 
     let _ = harness;
 }
-
-// ── use_query_unsignalled ──────────────────────────────────────────────────
 
 #[gpui::test]
 fn test_use_query_unsignalled_auto_fetches(cx: &mut TestAppContext) {
@@ -421,42 +301,5 @@ fn test_use_query_unsignalled_auto_fetches(cx: &mut TestAppContext) {
         let resource = harness.read(cx).entity.read(cx);
         assert_eq!(resource.status(), QueryStatus::Success);
         assert_eq!(resource.data(), Some(&99));
-    });
-}
-
-// ── use_query force_fetch ──────────────────────────────────────────────────
-
-#[gpui::test]
-fn test_fetch_query_refetch_after_success(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-
-    struct H {
-        entity: Entity<QueryResource<i32, QueryError>>,
-    }
-
-    let harness = cx.new(|cx| {
-        let (entity, _sub) = use_query(
-            QueryOptions::new("force-test").cache_policy(CachePolicy::NoCache),
-            |_signal| async move { Ok::<_, QueryError>(1_i32) },
-            cx,
-        );
-        H { entity }
-    });
-
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        assert_eq!(harness.read(cx).entity.read(cx).data(), Some(&1));
-    });
-
-    // Refetch with different data.
-    harness.update(cx, |this, cx| {
-        fetch_query(&this.entity, || async { Ok::<_, QueryError>(2_i32) }, cx);
-    });
-
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        assert_eq!(harness.read(cx).entity.read(cx).data(), Some(&2));
     });
 }

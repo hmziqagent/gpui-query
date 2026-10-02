@@ -10,34 +10,35 @@ You write a fetcher. The library manages the lifecycle.
 
 ```toml
 [dependencies]
-gpui-query = "0.2.0"
+gpui-query = "0.2.2"
 ```
 
 The default feature set includes the `client` layer. To use the declarative view hooks, enable the `hook` feature:
 
 ```toml
 [dependencies]
-gpui-query = { version = "0.2.0", features = ["hook"] }
+gpui-query = { version = "0.2.2", features = ["hook"] }
 ```
 
 If you only want the core state machine without pulling in GPUI:
 
 ```toml
 [dependencies]
-gpui-query = { version = "0.2.0", default-features = false, features = ["core"] }
+gpui-query = { version = "0.2.2", default-features = false, features = ["core"] }
 ```
 
-The `core` layer also builds for `wasm32-unknown-unknown`: the crate swaps ahash to compile-time RNG on wasm targets internally, so no extra configuration is needed. The `client`, `hook`, and `persist` layers are native-only — they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+The `core` layer also builds for `wasm32-unknown-unknown`: the crate swaps ahash to compile-time RNG on wasm targets internally, so no extra configuration is needed. The `client`, `hook`, and `persist` layers are native-only because they depend on `gpui`, which does not build for wasm.
 
 ## Quick start
 
 Set up a `QueryClient` as a GPUI global when your app starts:
 
-```rust
-use gpui::App;
+```rust,no_run
+use gpui::Application;
+# use gpui::BorrowAppContext;
 use gpui_query::QueryClient;
 
-App::new().run(|cx| {
+Application::new().run(|cx| {
     cx.set_global(QueryClient::new());
     // ... your views
 });
@@ -45,10 +46,20 @@ App::new().run(|cx| {
 
 Create a query in your view:
 
-```rust
-use gpui_query::{use_query, QueryOptions};
+```rust,no_run
+use gpui_query::use_query;
+# use gpui::{Context, Entity, Subscription};
+# use gpui_query::QueryResource;
+# struct MyView;
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# async fn fetch_users() -> Result<Vec<User>, MyError> {
+#     Ok(vec![])
+# }
 
-fn setup_query(cx: &mut ViewContext<MyView>) -> (Entity<QueryResource<Vec<User>, MyError>>, Subscription) {
+fn setup_query(cx: &mut Context<MyView>) -> (Entity<QueryResource<Vec<User>, MyError>>, Subscription) {
     use_query(
         "users",
         |signal| async move {
@@ -62,18 +73,27 @@ fn setup_query(cx: &mut ViewContext<MyView>) -> (Entity<QueryResource<Vec<User>,
 
 Read the state in `render`:
 
-```rust
-fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
-    let entity = self.query_entity.clone();
-    entity.read_with(cx, |resource| {
-        match resource.status() {
-            QueryStatus::LoadingEmpty => "Loading...",
-            QueryStatus::Success => "Got data",
-            QueryStatus::Failure => "Error",
-            _ => "Idle",
-        }
-    })
-}
+```rust,no_run
+# use gpui::{Context, Entity};
+# use gpui_query::{QueryResource, QueryStatus};
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# struct MyView {
+#     query_entity: Entity<QueryResource<Vec<User>, MyError>>,
+# }
+# impl MyView {
+#     fn label(&self, cx: &Context<Self>) -> &'static str {
+let label = self.query_entity.read_with(cx, |resource, _| match resource.status() {
+    QueryStatus::LoadingEmpty => "Loading...",
+    QueryStatus::Success => "Got data",
+    QueryStatus::Failure => "Error",
+    _ => "Idle",
+});
+#         label
+#     }
+# }
 ```
 
 ## Feature layers
@@ -97,7 +117,7 @@ The crate is split into four layers, each behind a feature flag:
 - Mutation callbacks for success, error, and settled states.
 - Infinite queries for paginated data.
 - Error sanitization that strips connection strings, tokens, paths, emails, and hex keys from messages.
-- Async persistence through the `Persister` trait (`persist` feature); a disk adapter ships in the [`gpui-query-persist`](https://crates.io/crates/gpui-query-persist) crate, and HTTP cache-header support in [`gpui-query-http`](https://crates.io/crates/gpui-query-http).
+- Async persistence through the `Persister` trait (`persist` feature). A disk adapter ships in the [`gpui-query-persist`](https://crates.io/crates/gpui-query-persist) crate, and HTTP cache-header support in [`gpui-query-http`](https://crates.io/crates/gpui-query-http).
 
 ## Links
 
@@ -118,4 +138,3 @@ The crate is split into four layers, each behind a feature flag:
 ## License
 
 MIT. See the [LICENSE](../../LICENSE) file for details.
-

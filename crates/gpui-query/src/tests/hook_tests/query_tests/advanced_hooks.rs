@@ -1,5 +1,3 @@
-//! Tests for cache hit behavior, signal cancellation, and signal availability.
-
 use std::sync::{Arc, Mutex};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
@@ -7,8 +5,6 @@ use gpui::{AppContext as _, Entity, TestAppContext};
 use crate::core::{CachePolicy, QueryError, QueryKey, QueryResource, QueryStatus, RequestPolicy};
 use crate::hook::*;
 use crate::tests::test_support::*;
-
-// ── use_query: key change triggers new fetch ────────────────────────────────
 
 #[gpui::test]
 fn test_use_query_same_key_returns_cached_entity(cx: &mut TestAppContext) {
@@ -30,7 +26,6 @@ fn test_use_query_same_key_returns_cached_entity(cx: &mut TestAppContext) {
             |_signal| async move { Ok::<_, QueryError>(20) },
             cx,
         );
-        // Same key via QueryClient returns the same entity.
         assert_eq!(
             entity_a.entity_id(),
             entity_b.entity_id(),
@@ -49,8 +44,6 @@ fn test_use_query_same_key_returns_cached_entity(cx: &mut TestAppContext) {
     });
 }
 
-// ── use_query: cache hit skips fetch ────────────────────────────────────────
-
 #[gpui::test]
 fn test_use_query_cache_hit_does_not_refetch(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -62,7 +55,6 @@ fn test_use_query_cache_hit_does_not_refetch(cx: &mut TestAppContext) {
         entity: Entity<QueryResource<&'static str, QueryError>>,
     }
 
-    // First call: populate cache with a long TTL.
     let harness = cx.new(|cx| {
         let (entity, _sub) = use_query(
             QueryOptions::new("cached-key").cache_policy(CachePolicy::Ttl { ttl_ms: 60_000 }),
@@ -95,12 +87,8 @@ fn test_use_query_cache_hit_does_not_refetch(cx: &mut TestAppContext) {
         "first fetch should have occurred"
     );
 
-    // Drain any pending executor work so the cache is fully settled.
     cx.run_until_parked();
 
-    // Explicitly assert the precondition: the first entity must be in Success
-    // state before we create the second harness. This guards against flakiness
-    // if cx.run_until_parked() ever changes its parking behavior.
     cx.update(|cx| {
         assert_eq!(
             harness.read(cx).entity.read(cx).status(),
@@ -109,9 +97,6 @@ fn test_use_query_cache_hit_does_not_refetch(cx: &mut TestAppContext) {
         );
     });
 
-    // Second use_query with the same key and fresh cache: should be a cache hit.
-    // Assert fetch_count is still 1 *before* creating the second harness so any
-    // regression that triggers an extra fetch is caught deterministically.
     assert_eq!(
         *fetch_count.lock().unwrap(),
         1,
@@ -131,13 +116,11 @@ fn test_use_query_cache_hit_does_not_refetch(cx: &mut TestAppContext) {
             },
             cx,
         );
-        // Entity should be the same cached one.
         assert_eq!(
             entity.entity_id(),
             harness.read(cx).entity.entity_id(),
             "should return the same cached entity"
         );
-        // The second entity should NOT be in a loading state — it received cached data.
         let status = entity.read(cx).status();
         assert!(
             !matches!(status, QueryStatus::LoadingEmpty),
@@ -163,14 +146,10 @@ fn test_use_query_cache_hit_does_not_refetch(cx: &mut TestAppContext) {
     );
 }
 
-// ── use_query: force_fetch option causes fetch even on Success entity ──────
-
 #[gpui::test]
 fn test_use_query_force_fetch_option_set(cx: &mut TestAppContext) {
     setup_query_client(cx);
 
-    // Verify that QueryOptions::force() sets the flag correctly and that
-    // a fresh use_query with force() still fetches normally.
     let opts = QueryOptions::new("force-opt").force();
     assert!(opts.force_fetch, "force() should set force_fetch to true");
 
@@ -198,16 +177,10 @@ fn test_use_query_force_fetch_option_set(cx: &mut TestAppContext) {
     });
 }
 
-// ── use_query: signal cancelled on replacement ────────────────────────────
-
 #[gpui::test]
 fn test_use_query_signal_cancelled_on_replacement(cx: &mut TestAppContext) {
     setup_test(cx);
 
-    // Verify that when a second fetch replaces an in-flight fetch, the first
-    // fetcher's signal is cancelled. We use use_query_manual + fetch_query
-    // because use_query only auto-fetches when Idle — a second use_query with
-    // the same key while LoadingEmpty would not trigger begin_request.
     let gate = Gate::new();
     let gate_clone = gate.clone();
     let executor = cx.background_executor.clone();
@@ -230,7 +203,6 @@ fn test_use_query_signal_cancelled_on_replacement(cx: &mut TestAppContext) {
             cx,
         );
 
-        // First fetch: blocks on the gate until we release it.
         let executor1 = executor.clone();
         fetch_query(
             &entity,
@@ -239,11 +211,8 @@ fn test_use_query_signal_cancelled_on_replacement(cx: &mut TestAppContext) {
                 let gate_clone = gate_clone.clone();
                 let executor = executor1.clone();
                 async move {
-                    // Record cancellation state when this fetcher first runs.
                     *fc1.lock().unwrap() = Some(false);
-                    // Wait for the gate via the shared helper.
                     gate_clone.wait(&executor).await;
-                    // Record final cancellation state — should be cancelled now.
                     *fc1.lock().unwrap() = Some(true);
                     Ok::<_, QueryError>("first-data")
                 }
@@ -254,8 +223,6 @@ fn test_use_query_signal_cancelled_on_replacement(cx: &mut TestAppContext) {
         H { entity }
     });
 
-    // Now issue a second fetch (replacement) via fetch_query — this triggers
-    // begin_request which cancels the first signal (LatestWins).
     harness.update(cx, |this, cx| {
         fetch_query(
             &this.entity,
@@ -270,25 +237,21 @@ fn test_use_query_signal_cancelled_on_replacement(cx: &mut TestAppContext) {
         );
     });
 
-    // Release the gate so the first fetcher can observe the cancellation.
     gate.release();
 
     cx.run_until_parked();
 
-    // Verify the first fetcher's initial state was recorded.
     assert_eq!(
         *first_cancelled.lock().unwrap(),
         Some(true),
         "first fetcher's signal should be cancelled after replacement fetch"
     );
-    // The second fetcher should not be cancelled.
     assert_eq!(
         *second_cancelled.lock().unwrap(),
         Some(false),
         "replacement fetcher's signal should not be cancelled"
     );
 
-    // The entity should have the second fetch's data.
     cx.update(|cx| {
         assert_eq!(
             harness.read(cx).entity.read(cx).data(),
@@ -296,8 +259,6 @@ fn test_use_query_signal_cancelled_on_replacement(cx: &mut TestAppContext) {
         );
     });
 }
-
-// ── use_query: signal checked during fetch ──────────────────────────────────
 
 #[gpui::test]
 fn test_use_query_signal_available_during_fetch(cx: &mut TestAppContext) {
@@ -317,7 +278,6 @@ fn test_use_query_signal_available_during_fetch(cx: &mut TestAppContext) {
                 let sw = sw.clone();
                 async move {
                     *sw.lock().unwrap() = true;
-                    // Signal should be a valid, non-cancelled signal.
                     assert!(!signal.is_cancelled(), "signal should not be cancelled");
                     Ok::<_, QueryError>("ok")
                 }

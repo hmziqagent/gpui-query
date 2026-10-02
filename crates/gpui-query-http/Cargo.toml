@@ -13,17 +13,15 @@ authors = ["hmziqrs"]
 
 [features]
 default = []
-## Enables the optional `reqwest`-based backend
-## ([`crate::reqwest_backend::ReqwestBackend`]).
-##
-## Off by default so the crate stays usable as a pure, library-agnostic HTTP
-## cache: any request library can plug into
-## [`crate::backend::HttpBackend`].
+## Optional `reqwest` backend; off by default so any client can plug into
+## [`crate::backend::HttpBackend`] instead.
 reqwest = ["dep:reqwest"]
 
+[lib]
+bench = false
+
 [dependencies]
-# `version` is required alongside `path`: `cargo publish` strips the path
-# override and the published manifest must reference the crates.io release.
+# `version` must stay alongside `path`: `cargo publish` strips the path override.
 gpui-query = { path = "../gpui-query", version = "0.2", default-features = false, features = ["core"] }
 bytes = "1"
 http = "1"
@@ -33,11 +31,10 @@ thiserror = "2"
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 
-# Docs.rs convention (see AGENTS.md / main crate): render with every feature so
-# the `reqwest`-gated `reqwest_backend` module and its re-export appear; the
-# default-features render would leave dead intra-doc links to them.
+# All-features render: the reqwest-gated module and re-export would otherwise
+# be dead intra-doc links.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

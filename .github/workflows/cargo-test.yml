@@ -1,13 +1,17 @@
 name: Cargo Test
 
-# Runs the full workspace test suite on Linux — the local mirror is
-# `just test`. The GPUI-linked test binaries (client/hook/persist layers and
-# the persist satellite) need X11/XCB dev libraries at link time, so the two
-# zed script/linux display packages are installed first (libxkbcommon-dev and
-# libxcb1-dev arrive transitively). The wasm32 boundary stays build-only in
-# wasm-check.yml: the repo has no wasm test targets today and browser-driven
-# wasm-bindgen-test needs runner infrastructure that is not warranted.
-# Cargo.lock is not committed; rust-cache keys off the manifests that exist.
+# Runs the full workspace test suite on Linux plus a release-profile
+# build/clippy gate; the local mirrors are `just test` and
+# `just release-check`. The release job exists because cfg(debug_assertions)
+# code compiles in only one profile, so a dev-profile suite stays green while
+# the release build breaks. The GPUI-linked test binaries (client/hook/persist
+# layers and the persist satellite) need X11/XCB dev libraries at link time,
+# so the two zed script/linux display packages are installed first
+# (libxkbcommon-dev and libxcb1-dev arrive transitively). The wasm32 boundary
+# stays build-only in wasm-check.yml: the repo has no wasm test targets today
+# and browser-driven wasm-bindgen-test needs runner infrastructure that is
+# not warranted. Cargo.lock is not committed; rust-cache keys off the
+# manifests that exist.
 
 on:
   push:
@@ -47,3 +51,24 @@ jobs:
 
       - name: Run all tests
         run: cargo test --all-features
+
+  cargo-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # No apt step and no `workspaces` override, matching wasm-check.yml:
+      # only test executables link against X11/XCB, and neither a release
+      # build (rlibs) nor clippy (check mode) links one.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build all features (release)
+        run: cargo build --all-features --release
+
+      - name: Lint all targets (release)
+        run: cargo clippy --all-features --all-targets --release -- -D warnings

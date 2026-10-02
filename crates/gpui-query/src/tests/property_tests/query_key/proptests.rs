@@ -1,19 +1,9 @@
-//! Property-based tests for QueryKey and QueryKeyFilter.
-//!
-//! Uses proptest to verify structural properties hold for all possible inputs,
-//! including edge cases like unicode, zero-width characters, and long keys.
-
 use proptest::prelude::*;
 
 use crate::core::*;
 
 use super::strategies::*;
 
-// Audit fix #126: cap the default proptest case count at 64 (down from the
-// default 256). The strategies still exercise unicode, separators, and deep
-// nesting, so the property coverage stays meaningful while keeping the
-// default `cargo test` run cheap. The heavyweight long-key / very-long-string
-// invariants are also covered by the deterministic_tests module.
 fn test_config() -> ProptestConfig {
     ProptestConfig {
         cases: 64,
@@ -21,12 +11,9 @@ fn test_config() -> ProptestConfig {
     }
 }
 
-// ── 1. Equality ─────────────────────────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// key1 == key2 iff all segments match.
     #[test]
     fn key_equality_same_segments(segments in arb_key()) {
         let k1 = make_key(&segments);
@@ -34,7 +21,6 @@ proptest! {
         prop_assert!(k1 == k2);
     }
 
-    /// Different segment lists produce unequal keys.
     #[test]
     fn key_equality_different_segments(a in arb_segments(), b in arb_segments()) {
         prop_assume!(a != b);
@@ -44,12 +30,9 @@ proptest! {
     }
 }
 
-// ── 2. Hash consistency ─────────────────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// Equal keys must produce equal hashes.
     #[test]
     fn key_hash_consistency(segments in arb_key()) {
         let k1 = make_key(&segments);
@@ -58,30 +41,23 @@ proptest! {
     }
 }
 
-// ── 3. Clone ────────────────────────────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// Cloning produces an equal key backed by the same Arc allocation.
     #[test]
     fn key_clone_equality(segments in arb_key()) {
         let key = make_key(&segments);
         let cloned = key.clone();
         prop_assert!(key == cloned);
-        // Verify cheap cloning: both keys deref to the same slice pointer
         let key_ptr: *const [std::sync::Arc<str>] = &*key;
         let cloned_ptr: *const [std::sync::Arc<str>] = &*cloned;
         prop_assert_eq!(key_ptr, cloned_ptr);
     }
 }
 
-// ── 4. Serde roundtrip ──────────────────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// deserialize(serialize(key)) == key for multi-segment keys.
     #[test]
     fn key_serde_roundtrip(segments in arb_key()) {
         let key = make_key(&segments);
@@ -90,7 +66,6 @@ proptest! {
         prop_assert!(key == back);
     }
 
-    /// deserialize(serialize(key)) == key for single-string keys.
     #[test]
     fn key_serde_single_string_roundtrip(s in any::<String>()) {
         let key = QueryKey::from_single(&s);
@@ -100,19 +75,15 @@ proptest! {
     }
 }
 
-// ── 5. Prefix matching (starts_with) ────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// Every key is a prefix of itself.
     #[test]
     fn key_prefix_self_match(segments in arb_key()) {
         let key = make_key(&segments);
         prop_assert!(key.starts_with(&key));
     }
 
-    /// A proper prefix always matches.
     #[test]
     fn key_proper_prefix_always_matches(
         prefix in arb_segments(),
@@ -125,7 +96,6 @@ proptest! {
         prop_assert!(full.starts_with(&prefix_key));
     }
 
-    /// Keys that diverge at the tail are not prefixes of each other.
     #[test]
     fn key_different_tail_does_not_match(
         common in arb_segments(),
@@ -146,7 +116,6 @@ proptest! {
         prop_assert!(key_b.starts_with(&common_key));
     }
 
-    /// A longer key is never a prefix of a shorter key.
     #[test]
     fn key_longer_never_prefix_of_shorter(
         short in arb_segments(),
@@ -161,27 +130,26 @@ proptest! {
     }
 }
 
-// ── 6. to_path format ───────────────────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// to_path joins segments with "::" separator.
     #[test]
-    fn key_to_path_format(segments in arb_key()) {
+    fn key_to_path_roundtrips_through_from_path(segments in arb_key()) {
         let key = make_key(&segments);
         let path = key.to_path();
-        let expected = segments.join("::");
-        prop_assert_eq!(path, expected);
+        prop_assert_eq!(QueryKey::from_path(&path), key);
+    }
+
+    #[test]
+    fn key_to_path_distinct_for_distinct_keys(a in arb_key(), b in arb_key()) {
+        prop_assume!(a != b);
+        prop_assert_ne!(make_key(&a).to_path(), make_key(&b).to_path());
     }
 }
 
-// ── 7. QueryKeyFilter semantics ─────────────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// Exact filter matches only the identical key.
     #[test]
     fn filter_exact_matches_only_identical(
         target in arb_key(),
@@ -197,7 +165,6 @@ proptest! {
         }
     }
 
-    /// Prefix filter matches child keys and the prefix itself.
     #[test]
     fn filter_prefix_matches_children(
         prefix in arb_segments(),
@@ -212,7 +179,6 @@ proptest! {
         prop_assert!(filter.matches(&prefix_key));
     }
 
-    /// Prefix filter rejects keys that differ from the prefix.
     #[test]
     fn filter_prefix_rejects_non_prefix(
         prefix in arb_segments(),
@@ -229,7 +195,6 @@ proptest! {
         }
     }
 
-    /// All filter matches every possible key.
     #[test]
     fn filter_all_matches_everything(segments in arb_key()) {
         let key = make_key(&segments);
@@ -237,12 +202,9 @@ proptest! {
     }
 }
 
-// ── 8. Edge cases: unicode and long keys ────────────────────────────────
-
 proptest! {
     #![proptest_config(test_config())]
 
-    /// Unicode segments survive clone, hash, serde, and to_path.
     #[test]
     fn key_unicode_roundtrip(
         segments in prop::collection::vec("[\\p{L}\\p{N}]{1,10}", 1..5),
@@ -257,10 +219,6 @@ proptest! {
         prop_assert_eq!(key.to_path(), segments.join("::"));
     }
 
-    /// Longer keys still satisfy all invariants.
-    // Audit fix #126: reduced segment bound from 50..100 to 20..40 so the
-    // heavy multi-segment case stays within the default `cargo test` budget.
-    // Deep-nesting correctness is also exercised by the deterministic suite.
     #[test]
     fn key_long_key_correctness(
         segments in prop::collection::vec(any::<String>(), 20..40),

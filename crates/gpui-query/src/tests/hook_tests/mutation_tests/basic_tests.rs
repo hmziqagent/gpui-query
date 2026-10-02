@@ -1,5 +1,3 @@
-//! Basic mutation tests: creation, mutate, failure, client registration, concurrent guard.
-
 use std::sync::{Arc, Mutex};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
@@ -12,7 +10,6 @@ use crate::tests::test_support::*;
 fn test_use_mutation_creates_idle_entity(cx: &mut TestAppContext) {
     setup_query_client(cx);
 
-    // Audit fix #47: use the shared `HookHarness` instead of a one-off `struct H`.
     let harness = cx.new(|cx| {
         let (entity, _sub) = use_mutation::<String, String, QueryError, _>((), cx);
         let resource = entity.read(cx);
@@ -33,7 +30,6 @@ fn test_use_mutation_creates_idle_entity(cx: &mut TestAppContext) {
 fn test_mutate_triggers_execution_and_completes(cx: &mut TestAppContext) {
     setup_query_client(cx);
 
-    // Audit fix #47: use the shared `HookHarness` instead of a one-off `struct H`.
     let harness = cx.new(|cx| {
         let (entity, _sub) = use_mutation::<String, String, QueryError, _>((), cx);
         mutate(
@@ -51,8 +47,6 @@ fn test_mutate_triggers_execution_and_completes(cx: &mut TestAppContext) {
 
     cx.run_until_parked();
 
-    // Audit fix #48: adopt the shared `run_until_parked_and_read` helper instead
-    // of `cx.run_until_parked()` + a manual `cx.update` read.
     let data = run_until_parked_and_read(cx, &harness, |h, cx| {
         let resource = h.entity.read(cx);
         (resource.is_success(), resource.data().cloned())
@@ -93,48 +87,6 @@ fn test_mutate_failure_stores_error(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn test_mutate_rejects_concurrent_calls(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-
-    struct H {
-        mutation: Entity<MutationResource<String, String, QueryError>>,
-    }
-
-    let harness = cx.new(|cx| {
-        let (entity, _sub) = use_mutation::<String, String, QueryError, _>((), cx);
-
-        // Start the first mutation.
-        mutate(
-            &entity,
-            "first".to_string(),
-            |_vars| async move { Ok::<_, QueryError>("first-result".to_string()) },
-            cx,
-        );
-        assert!(entity.read(cx).is_loading());
-
-        // Attempt a second mutate while the first is still loading.
-        // The second call should be rejected (no-op) per audit fix #8.
-        mutate(
-            &entity,
-            "second".to_string(),
-            |_vars| async move { Ok::<_, QueryError>("second-result".to_string()) },
-            cx,
-        );
-
-        H { mutation: entity }
-    });
-
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        let resource = harness.read(cx).mutation.read(cx);
-        assert!(resource.is_success());
-        assert_eq!(resource.variables(), Some(&"first".to_string()));
-        assert_eq!(resource.data(), Some(&"first-result".to_string()));
-    });
-}
-
-#[gpui::test]
 fn test_use_mutation_registers_with_client(cx: &mut TestAppContext) {
     setup_query_client(cx);
 
@@ -167,7 +119,6 @@ fn test_mutate_double_while_loading_second_rejected(cx: &mut TestAppContext) {
     let harness = cx.new(|cx| {
         let (entity, _sub) = use_mutation::<String, String, QueryError, _>((), cx);
 
-        // First mutate.
         mutate(
             &entity,
             "first".to_string(),
@@ -181,7 +132,6 @@ fn test_mutate_double_while_loading_second_rejected(cx: &mut TestAppContext) {
             cx,
         );
 
-        // Second mutate while still loading — should be rejected.
         mutate(
             &entity,
             "second".to_string(),

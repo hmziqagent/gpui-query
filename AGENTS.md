@@ -6,39 +6,39 @@ Async state management for [GPUI](https://github.com/zed-industries/zed/tree/mai
 
 Workspace (`resolver = "3"`, edition 2024) with three published members:
 
-- `crates/gpui-query` — main crate (v0.2.0), four gated layers (see Feature matrix).
-- `crates/gpui-query-http` — satellite (v0.1.0): RFC 9111 `Cache-Control` → `CachePolicy`, URL-keyed `HttpCache<B>` over a pluggable `HttpBackend`. GPUI-free.
-- `crates/gpui-query-persist` — satellite (v0.1.0): reference atomic disk `FilePersister` (JSON/bincode) implementing the main crate's async `Persister`.
-- `crates/gpui-query-legacy` — DEPRECATED and EXCLUDED from the workspace (`exclude = [...]`). Frozen artifact; publish only via its own workflow.
+- `crates/gpui-query`: main crate (v0.2.1), four gated layers (see Feature matrix).
+- `crates/gpui-query-http`: satellite (v0.1.0), RFC 9111 `Cache-Control` → `CachePolicy`, URL-keyed `HttpCache<B>` over a pluggable `HttpBackend`. GPUI-free.
+- `crates/gpui-query-persist`: satellite (v0.1.0), reference atomic disk `FilePersister` (JSON/bincode) implementing the main crate's async `Persister`.
+- `crates/gpui-query-legacy`: DEPRECATED and EXCLUDED from the workspace (`exclude = [...]`). Frozen artifact; publish only via its own workflow.
 
 `gpui-query` layers, each behind a Cargo feature flag:
 
-- `core` — serde-only state machine (`QueryResource`, `MutationResource`, `CachePolicy`, `RetryPolicy`, `QueryKey`). Zero GPUI.
-- `client` — `QueryClient` GPUI `Global`: type-partitioned `QueryBucket<T,E>`, GC, invalidation, observers.
-- `hook` — `use_query` / `use_mutation` / `use_infinite_query`, returning `(Entity, Subscription)`.
-- `persist` — async `Persister` trait, `persist_with` debounced driver, `hydrate()`, serializer registries.
+- `core`: serde-only state machine (`QueryResource`, `MutationResource`, `CachePolicy`, `RetryPolicy`, `QueryKey`). Zero GPUI.
+- `client`: `QueryClient` GPUI `Global` (type-partitioned `QueryBucket<T,E>`, GC, invalidation, observers).
+- `hook`: `use_query` / `use_mutation` / `use_infinite_query`, returning `(Entity, Subscription)`.
+- `persist`: async `Persister` trait, `persist_with` debounced driver, `hydrate()`, serializer registries.
 
-The public API is glob re-exported at the crate root (`pub use core::*; pub use client::*; pub use hook::*;`) — import from `gpui_query::`.
+The public API is glob re-exported at the crate root (`pub use core::*; pub use client::*; pub use hook::*;`). Import from `gpui_query::`.
 
 ## Commands
 
 Task runner is `just` (justfile at repo root). Recipes shown with their raw equivalent.
 
-- Test everything — `just test` / `cargo test --all-features`.
-- Test one layer — `just test-feature hook` / `cargo test --features "hook"`.
-- Core-only (no GPUI) — `cargo test --no-default-features --features core`.
-- Build all — `cargo build --all-features`.
-- Docs — `cargo doc --all-features`.
+- Test everything: `just test` / `cargo test --all-features`.
+- Test one layer: `just test-feature hook` / `cargo test --features "hook"`.
+- Core-only (no GPUI): `cargo test -p gpui-query --no-default-features --features core`.
+- Build all: `cargo build --all-features`.
+- Docs: `cargo doc --all-features`.
 
 Default features are `client` only, so bare `cargo test` builds the `core` + `client` test modules but skips the `hook`/`persist`-gated ones. Always use `just test` (`--all-features`) for the full suite.
 
-Web docs (Astro + Starlight, bun-managed) — run from `web/`:
+Web docs (Astro + Starlight, bun-managed); run from `web/`:
 
 - `just web-install` / `bun install`.
-- `just web-dev` / `bun run dev` — dev server on port 3000.
-- `just web-build` / `bun run build` — full build to `dist/client/` (OG images → `astro build` → Pagefind → `llms.txt` → md-alt).
+- `just web-dev` / `bun run dev`: dev server on port 3000.
+- `just web-build` / `bun run build`: full build to `dist/client/` (OG images → `astro build` → Pagefind → `llms.txt` → md-alt).
 - `just web-preview` / `bun run preview`.
-- `just deploy` — triggers the Deploy Website workflow.
+- `just deploy`: triggers the Deploy Website workflow.
 
 ## Feature matrix
 
@@ -46,10 +46,10 @@ Main crate, strictly additive (`core` ← `client` ← `hook` ← `persist`):
 
 | Layer | Cargo line |
 |---|---|
-| core only (no GPUI) | `gpui-query = { version = "0.2.0", default-features = false, features = ["core"] }` |
-| client (DEFAULT) | `gpui-query = "0.2.0"` |
-| hooks | `gpui-query = { version = "0.2.0", features = ["hook"] }` |
-| persistence | `gpui-query = { version = "0.2.0", features = ["persist"] }` |
+| core only (no GPUI) | `gpui-query = { version = "0.2.1", default-features = false, features = ["core"] }` |
+| client (DEFAULT) | `gpui-query = "0.2.1"` |
+| hooks | `gpui-query = { version = "0.2.1", features = ["hook"] }` |
+| persistence | `gpui-query = { version = "0.2.1", features = ["persist"] }` |
 
 ```
 default = ["client"]
@@ -66,7 +66,7 @@ Satellites depend on `gpui-query` core-only by default: `gpui-query-http` (optio
 CHANGELOG-driven. The `CHANGELOG.md` version heading is the source of truth; CI bumps `Cargo.toml` and syncs the version literal into the READMEs and the docs install page.
 
 1. Add a `## [x.y.z] - YYYY-MM-DD` section to `CHANGELOG.md`.
-2. `just release x.y.z` — verifies the heading, commits `chore: release vX`, pushes master.
+2. `just release x.y.z`: verifies the heading, commits `chore: release vX`, pushes master.
 3. The push triggers `Changelog Release`: tag, GitHub Release, `cargo publish`, and web deploy.
 
 Manual escape hatches: `just publish <tag>` (Publish Crate Manual), `just deploy` (Deploy Website). The legacy crate has its own `Publish Legacy Crate (Manual)` workflow.
@@ -76,10 +76,27 @@ Manual escape hatches: `just publish <tag>` (Publish Crate Manual), `just deploy
 `web/` is Astro + Starlight, bun-managed, deployed to Cloudflare Pages project `gpui-query` from `web/dist/client`. Docs served at `/docs/**`; site root is the marketing page.
 
 - `llms.txt` and `llms-full.txt` are AUTO-GENERATED into the site root by `web/scripts/generate-llms-txt.ts` during `just web-build`. Do NOT hand-edit them or anything under `web/dist/**`.
-- Per-page `.md` and `.txt` alternates (one per public page — append the extension to any URL, e.g. `/docs/guides/caching.md`; root → `/index.{md,txt}`, docs index → `/docs.{md,txt}`) are AUTO-GENERATED by `web/scripts/generate-page-alts.ts` from `web/scripts/lib/pages.ts`, and each HTML page advertises them via `<link rel="alternate">`. They run ~80–90% smaller than the HTML. Do NOT hand-edit them.
-- Page copy shared between the rendered page and its `.md`/`.txt` alternates is authored ONCE: FAQ in `web/src/lib/faq-data.ts`, privacy + terms in `web/src/lib/legal-content.ts` (rendered to HTML by `web/src/lib/inline-md.ts`). Edit there — never duplicate it into the `.astro` files or the generator.
+- Per-page `.md` and `.txt` alternates (one per public page: append the extension to any URL, e.g. `/docs/guides/caching.md`; root → `/index.{md,txt}`, docs index → `/docs.{md,txt}`) are AUTO-GENERATED by `web/scripts/generate-page-alts.ts` from `web/scripts/lib/pages.ts`, and each HTML page advertises them via `<link rel="alternate">`. They run ~80-90% smaller than the HTML. Do NOT hand-edit them.
+- Page copy shared between the rendered page and its `.md`/`.txt` alternates is authored ONCE: FAQ in `web/src/lib/faq-data.ts`, privacy + terms in `web/src/lib/legal-content.ts` (rendered to HTML by `web/src/lib/inline-md.ts`). Edit there. Never duplicate it into the `.astro` files or the generator.
 - Search is one combined Pagefind index.
 - Directory output (`build.format: "directory"`) with `trailingSlash: "ignore"` so both `/docs` and `/docs/` serve; the `Head.astro` override normalizes canonical/OG URLs.
+
+## Hard rules
+
+Binding on every change; violations are review-blocking.
+
+- Comments: don't comment unless the code can't say it. Inline comments are 1-2 lines max, true invariants only (lock ordering, RFC citations, platform quirks, safety notes). No narration, no change-history notes ("T5:", "fixed:"), no restating what the code already says. Doc comments: one line that adds what the signature cannot (semantics, constraints, gotchas) or an `# Examples` block with doctests, with no summary line above the fence. Docs that restate the item name or narrate the obvious get deleted. `missing_docs`-forced docs use the minimal legal one-liner. Module docs max 3 lines. Test files carry no comments; test names carry intent.
+- Skills: load rust-best-practices and rust-testing before writing or reviewing Rust; add rust-async-patterns for async paths and gpui-kit for GPUI-facing code. Run humanizer and humanize-writing over any prose change before merging.
+- Copywriting: all prose (comments, READMEs, docs) must read human-written: no em-dash cadence, no rule-of-three padding, no "seamless/robust/leverage" vocabulary.
+- Gates: `cargo test --all-features`, `cargo clippy --all-features --all-targets -- -D warnings`, and `cargo doc --all-features --no-deps` (zero warnings) all pass before a change is done. Bare `cargo test` skips the hook/persist modules; that is not a green run.
+- API stability: these are published crates. Never remove, rename, or retype a pub item in a patch release. Add instead of break.
+- Untrusted input: parsing or deserializing anything from disk or network returns `Err`, never panics. No `unwrap`/`expect`/indexing on unbounded values, and arithmetic on them uses checked or saturating ops. New parse or serde paths get adversarial tests.
+- Secrets in errors: error text that can carry user data goes through sanitization before Display, Debug, or serde. New redaction gaps (case or whitespace variants) are bugs, not style.
+- Cache semantics: `gpui-query-http` follows RFC 9111. It is a private cache: `max-age` beats `s-maxage`, `no-store` dominates from any position, duplicate directives are first-occurrence-wins, and directive values saturate instead of erroring.
+- Disk writes: atomic only. Temp file, fsync, rename, fsync the parent dir. Cache files are `0o600`.
+- Perf: no redundant hashing or serialization per debounce or poll cycle. Clone at ownership boundaries, not for convenience.
+- Trimming beats adding. Dead code, duplicated plumbing, and comments that restate their docs get deleted, not maintained.
+- Every bug fix lands with a test that fails on the old code.
 
 ## Conventions
 
@@ -88,10 +105,11 @@ Manual escape hatches: `just publish <tag>` (Publish Crate Manual), `just deploy
 - Author identity is `authors = ["hmziqrs"]` in every published crate (no email).
 - Commits are conventional lower-case: `chore:`, `fix:`, `feat:`, `ci:`.
 - docs.rs: `all-features = true`, `--cfg docsrs`; `lib.rs` gates `#![cfg_attr(docsrs, feature(doc_cfg))]`.
+- Two user-facing Claude Code skill packs live in `skills/`: `gpui-query` (hooks, in-memory caching, invalidation, observers, retry) and `gpui-query-extensions` (HTTP cache headers, disk persistence). They target apps that depend on gpui-query, not work on this repo. Install: `cp -R skills/gpui-query skills/gpui-query-extensions ~/.claude/skills/`.
 
 ## Gotchas
 
 - `Cargo.lock` is NOT committed (library convention; `.gitignore` line 4). Do not `git add` it.
 - macOS builds of the `client`/`hook`/`persist` layers fail without the Metal Toolchain. Run `xcodebuild -downloadComponent MetalToolchain` once. Core-only builds need nothing extra.
-- `gpui-query-legacy` is excluded from the workspace — invisible to `cargo build --workspace`, but still published. Treat as frozen; edit it only via its own workflow.
-- GPUI is pinned to `gpui = "0.2.2"` on crates.io. A `zed-industries/zed` git-rev pin is commented out in the root `Cargo.toml` for local debugging — never commit it uncommented (breaks `cargo publish`).
+- `gpui-query-legacy` is excluded from the workspace: invisible to `cargo build --workspace`, but still published. Treat as frozen; edit it only via its own workflow.
+- GPUI is pinned to `gpui = "0.2.2"` on crates.io. A `zed-industries/zed` git-rev pin is commented out in the root `Cargo.toml` for local debugging; never commit it uncommented (breaks `cargo publish`).

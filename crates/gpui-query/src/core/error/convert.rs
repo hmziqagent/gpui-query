@@ -1,5 +1,3 @@
-//! Standard trait implementations for [`QueryError`](super::QueryError).
-
 use super::types::QueryError;
 
 impl std::fmt::Display for QueryError {
@@ -23,21 +21,14 @@ impl AsRef<std::sync::Arc<str>> for QueryError {
 }
 
 impl From<String> for QueryError {
-    /// Creates a [`QueryError`] with kind [`QueryErrorKind::Unknown`](super::QueryErrorKind::Unknown).
-    ///
-    /// `From<String>` and `From<&str>` always map to `Unknown` because the
-    /// original error category cannot be recovered from a plain string. Use
-    /// [`QueryError::transport`], [`QueryError::response`], or
-    /// [`QueryError::cancelled`] for typed errors.
+    /// Always maps to `Unknown` because the category cannot be recovered from
+    /// a plain string; use `transport`/`response`/`cancelled` for typed errors.
     fn from(value: String) -> Self {
         Self::unknown(value)
     }
 }
 
 impl From<&str> for QueryError {
-    /// Creates a [`QueryError`] with kind [`QueryErrorKind::Unknown`](super::QueryErrorKind::Unknown).
-    ///
-    /// See [`From<String>`] for rationale on the `Unknown` mapping.
     fn from(value: &str) -> Self {
         Self::unknown(value)
     }

@@ -1,16 +1,11 @@
-//! Mutation registration, lifecycle, cancel, and diagnostics tests (tests 18–23, 56).
-
 use gpui::{AppContext as _, BorrowAppContext as _, TestAppContext};
 
 use crate::client::{MutationObserver, ObserverConfig, QueryClient, QueryObserver};
 use crate::core::*;
 use crate::tests::test_support::*;
 
-// -- 18. Mutation registration with key --------------------------------------
-
 #[gpui::test]
 fn test_mutation_with_key_registration(cx: &mut TestAppContext) {
-    // Audit fix #46: prefer the shorter `setup_test` alias.
     setup_test(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
@@ -26,32 +21,24 @@ fn test_mutation_with_key_registration(cx: &mut TestAppContext) {
     });
 }
 
-// -- 19. all_mutations returns empty for unregistered type --------------------
-
 #[gpui::test]
 fn test_all_mutations_empty_for_unregistered_type(cx: &mut TestAppContext) {
-    // Audit fix #46: prefer the shorter `setup_test` alias.
     setup_test(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Register one type
             let e = cx.new(|_| {
                 MutationResource::<String, User, QueryError>::new(RetryPolicy::no_retries())
             });
             client.register_mutation::<String, User, QueryError>(&e, cx);
 
-            // Ask for different type triple
             let other = client.all_mutations::<u32, User, QueryError>();
             assert!(other.is_empty(), "no u32 mutations registered");
         });
     });
 }
 
-// -- 20. Multiple mutations of same type --------------------------------------
-
 #[gpui::test]
 fn test_multiple_mutations_same_type(cx: &mut TestAppContext) {
-    // Audit fix #46: prefer the shorter `setup_test` alias.
     setup_test(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
@@ -74,8 +61,6 @@ fn test_multiple_mutations_same_type(cx: &mut TestAppContext) {
     });
 }
 
-// -- 21. Mutation full lifecycle via client: begin -> fail -> retry -> success
-
 #[gpui::test]
 fn test_mutation_full_lifecycle_with_retries(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -85,7 +70,6 @@ fn test_mutation_full_lifecycle_with_retries(cx: &mut TestAppContext) {
                 cx.new(|_| MutationResource::<String, User, QueryError>::new(RetryPolicy::new(2)));
             client.register_mutation::<String, User, QueryError>(&entity, cx);
 
-            // First attempt: begin -> fail
             entity.update(cx, |m, _| {
                 m.begin("create_user".to_string());
             });
@@ -97,13 +81,11 @@ fn test_mutation_full_lifecycle_with_retries(cx: &mut TestAppContext) {
             assert!(entity.read(cx).is_failure());
             assert_eq!(entity.read(cx).retry_count(), 1);
 
-            // Retry
             entity.update(cx, |m, _| {
                 assert!(m.retry());
             });
             assert!(entity.read(cx).is_loading());
 
-            // Retry succeeds
             entity.update(cx, |m, _| {
                 m.complete_success(User::new(99, "Retry Success"));
             });
@@ -112,8 +94,6 @@ fn test_mutation_full_lifecycle_with_retries(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 22. Mutation cancel through client --------------------------------------
 
 #[gpui::test]
 fn test_mutation_cancel_via_resource(cx: &mut TestAppContext) {
@@ -142,8 +122,6 @@ fn test_mutation_cancel_via_resource(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 23. Mutation diagnostics populated --------------------------------------
 
 #[gpui::test]
 fn test_diagnostics_includes_mutations_with_status(cx: &mut TestAppContext) {
@@ -182,19 +160,6 @@ fn test_diagnostics_includes_mutations_with_status(cx: &mut TestAppContext) {
     });
 }
 
-// -- 50. ObserverConfig default is status_change_only -------------------------
-
-#[gpui::test]
-fn test_observer_config_default(_cx: &mut TestAppContext) {
-    let config = ObserverConfig::default();
-    assert!(
-        config.notify_on_status_change_only,
-        "default should notify on status change only"
-    );
-}
-
-// -- 56. Diagnostics: mutation retry_count tracked ---------------------------
-
 #[gpui::test]
 fn test_diagnostics_mutation_retry_count(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -219,27 +184,6 @@ fn test_diagnostics_mutation_retry_count(cx: &mut TestAppContext) {
     });
 }
 
-// -- Mutation observer tests (originally 45-48) --------------------------------
-
-#[gpui::test]
-fn test_query_observer_observe_succeeds_for_live_entity(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-    cx.update(|cx| {
-        cx.update_global::<QueryClient, _>(|client, cx| {
-            let entity = client.resource::<String, QueryError>("live_obs", cx);
-            let mut observer = QueryObserver::new(&entity);
-
-            // Audit fix #52: adopt the shared `observe_with_dummy_view` helper
-            // instead of a local `struct DummyView;` + manual view dance.
-            let result = observe_with_dummy_view::<String, QueryError>(cx, &mut observer);
-            assert!(
-                result.is_some(),
-                "observe should return Some(Subscription) for a live entity"
-            );
-        });
-    });
-}
-
 #[gpui::test]
 fn test_mutation_observer_observe_returns_subscription(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -257,26 +201,6 @@ fn test_mutation_observer_observe_returns_subscription(cx: &mut TestAppContext) 
         );
     });
 }
-
-#[gpui::test]
-fn test_mutation_observer_weak_entity_pattern(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-    cx.update(|cx| {
-        let entity = cx
-            .new(|_| MutationResource::<String, User, QueryError>::new(RetryPolicy::no_retries()));
-        let observer = MutationObserver::<String, User, QueryError>::new(&entity);
-
-        struct DummyView;
-        let view = cx.new(|_| DummyView);
-        let sub = view.update(cx, |_view, cx| observer.observe(cx));
-        assert!(
-            sub.is_some(),
-            "observe should return Some for live mutation entity"
-        );
-    });
-}
-
-// -- 51. QueryObserver with_config custom settings ---------------------------
 
 #[gpui::test]
 fn test_query_observer_with_config_always_notify(cx: &mut TestAppContext) {

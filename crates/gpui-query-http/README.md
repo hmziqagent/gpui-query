@@ -24,19 +24,19 @@ The usage examples also reference `gpui-query` (for `core::{CachePolicy, Fetched
 
 ## What it does
 
-- **Header → policy ("server wins").** `cache_policy_from_headers` reads RFC 9111 `Cache-Control` directives and returns the matching `gpui_query::core::CachePolicy`.
-- **In-memory HTTP cache.** `HttpCache<B>` wraps any `HttpBackend`: fresh entries short-circuit the network entirely, stale entries revalidate with `If-None-Match` / `If-Modified-Since`, and a `304 Not Modified` refreshes the entry without transferring a body.
-- **Pluggable backend.** `HttpBackend` abstracts a single conditional `GET`. The crate ships `ReqwestBackend` behind the `reqwest` feature; any other client can implement the trait and feed `HttpCache::new`.
-- **Serializable metadata.** `CacheMeta` (ETag, `Last-Modified`, `stored_at`, `fresh_for`, `stale_for`) is serde-serializable, so it round-trips through a persistence layer for cheap `304` refetches on cold start.
-- **Typed errors.** `ParseError` (`InvalidMaxAge`, `InvalidStaleWhileRevalidate`) for malformed directives; `HttpError` for backend failures, bad policies, poisoned mutexes, and spurious `304`s.
+- Header → policy ("server wins"): `cache_policy_from_headers` reads RFC 9111 `Cache-Control` directives and returns the matching `gpui_query::core::CachePolicy`.
+- In-memory HTTP cache: `HttpCache<B>` wraps any `HttpBackend`. Fresh entries skip the network entirely, stale entries revalidate with `If-None-Match` / `If-Modified-Since`, and a `304 Not Modified` re-serves the cached body and refreshes the stored entry unless its own `Cache-Control` blocks caching.
+- Pluggable backend: `HttpBackend` abstracts a single conditional `GET`. The crate ships `ReqwestBackend` behind the `reqwest` feature; any other client can implement the trait and feed `HttpCache::new`.
+- Serializable metadata: `CacheMeta` (ETag, `Last-Modified`, `stored_at`, `fresh_for`, `stale_for`) is serde-serializable, so it round-trips through a persistence layer for cheap `304` refetches on cold start.
+- Typed errors: `ParseError` (`InvalidMaxAge`, `InvalidStaleWhileRevalidate`) for malformed directives, `HttpError` for backend failures, poisoned mutexes, and spurious `304`s. A malformed `Cache-Control` never fails a fetch: `HttpCache::fetch` serves the body uncacheable and stores nothing. `ParseError` surfaces only for direct callers of `cache_policy_from_headers`.
 
 Parsing rules (priority order):
 
-1. `no-store` or `no-cache` → `CachePolicy::NoCache` (short-circuits immediately).
-2. `max-age=N` (seconds) → `CachePolicy::Ttl { ttl_ms: N * 1000 }`; add `stale-while-revalidate=M` → `CachePolicy::StaleWhileRevalidate { ttl_ms, stale_ms }`.
-3. Otherwise → `CachePolicy::NoCache`.
+1. `no-store` or `no-cache` anywhere → `CachePolicy::NoCache`, regardless of position or malformed directives elsewhere.
+2. `max-age=N` (seconds) → `CachePolicy::Ttl { ttl_ms: N * 1000 }`; add `stale-while-revalidate=M` → `CachePolicy::StaleWhileRevalidate { ttl_ms, stale_ms }`. Duplicated directives keep their first occurrence (RFC 9111 §4.2.1), and a delta-seconds too large for `u64` saturates instead of erroring (RFC 9111 §1.2.2).
+3. Otherwise → `CachePolicy::NoCache`; malformed values surface as `ParseError`.
 
-`s-maxage` takes precedence over `max-age` when both are set. Directive names are matched case-insensitively and values may be quoted (`max-age="600"`).
+When both are set, `max-age` wins: `HttpCache` is a private cache, and RFC 9111 §5.2.2.10 scopes `s-maxage` to shared caches. `s-maxage` alone still sets the TTL. Directive names are matched case-insensitively and values may be quoted (`max-age="600"`).
 
 ## Usage
 
@@ -58,24 +58,36 @@ Return that `Fetched<T>` from a fetcher passed to [`gpui_query::use_query_with_p
 
 For the cache layer, wrap any `HttpBackend`. With the `reqwest` feature:
 
-```rust
+```rust,no_run
 use gpui_query_http::{HttpCache, ReqwestBackend};
 
+# async fn doc() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let cache = HttpCache::new(ReqwestBackend::from_client(reqwest::Client::new()));
 
 // Fresh hit → no network call; stale → conditional GET; 304 → cached body.
 let (body, policy, meta) = cache.fetch("https://example.test/data").await?;
+#     let _ = (body, policy, meta);
+#     Ok(())
+# }
 ```
 
 ## WebAssembly
 
-The crate compiles for `wasm32-unknown-unknown` with the default feature set and with the `reqwest` feature — the same feature flags work on both targets. On wasm, `ReqwestBackend` runs on reqwest's browser-fetch backend and TLS is the browser's job; the `rustls-tls` feature that the `reqwest` feature enables for native use is inert there, so it is harmless to leave on.
+The crate compiles for `wasm32-unknown-unknown` with the default feature set and with the `reqwest` feature; the same feature flags work on both targets. On wasm, `ReqwestBackend` runs on reqwest's browser-fetch backend and TLS is the browser's job. The `rustls-tls` feature that `reqwest` enables for native use is inert there, so it is harmless to leave on.
 
-For custom backends, `HttpBackend::fetch` bounds its returned future with `MaybeSend` (exported at the crate root) instead of `Send`. On native targets `MaybeSend` is exactly `Send`, so an existing impl written with `+ Send` keeps compiling unchanged — no migration needed. Use `+ MaybeSend` only when a backend must compile on both native and wasm targets: on `wasm32`, browser-fetch futures (reqwest's included) are inherently `!Send` because they hold JS values, so a `+ Send` bound would not compile there.
+For custom backends, `HttpBackend::fetch` bounds its returned future with `MaybeSend` (exported at the crate root) instead of `Send`. On native targets `MaybeSend` is exactly `Send`, so an existing impl written with `+ Send` keeps compiling unchanged. Use `+ MaybeSend` only when a backend must compile on both native and wasm: browser-fetch futures on `wasm32` (reqwest's included) hold JS values and are therefore `!Send`, so a `+ Send` bound would not compile there.
 
-```rust
+```rust,no_run
 use std::future::Future;
 use gpui_query_http::{BackendResponse, Conditionals, HttpBackend, MaybeSend};
+# #[derive(Debug)]
+# struct MyError;
+# impl std::fmt::Display for MyError {
+#     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+#         f.write_str("GET failed")
+#     }
+# }
+# impl std::error::Error for MyError {}
 
 struct MyBackend;
 
@@ -87,7 +99,8 @@ impl HttpBackend for MyBackend {
         url: &str,
         conditionals: Conditionals,
     ) -> impl Future<Output = Result<BackendResponse, MyError>> + MaybeSend {
-        // perform the conditional GET ...
+        // perform the conditional GET (stubbed here)
+        async { Err(MyError) }
     }
 }
 ```

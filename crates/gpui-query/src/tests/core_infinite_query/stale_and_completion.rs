@@ -1,9 +1,5 @@
-//! Tests for stale request rejection and two-phase completion protocol.
-
 use super::helpers::*;
 use crate::core::*;
-
-// ── 6. Stale rejection for page fetches ─────────────────────────────────
 
 #[test]
 fn stale_request_success_is_rejected() {
@@ -13,9 +9,7 @@ fn stale_request_success_is_rejected() {
     let id1 = r.begin_fetch_next(&mut seq, 1_000).unwrap();
     let id2 = r.begin_fetch_next(&mut seq, 2_000).unwrap();
 
-    // Completing the first (stale) request should fail
     assert!(!r.complete_page_success(id1, vec!["stale"], true, true, 3_000));
-    // Completing the second (current) request should succeed
     assert!(r.complete_page_success(id2, vec!["fresh"], false, true, 3_000));
     assert_eq!(r.page_count(), 1);
     assert_eq!(r.last_page(), Some(&vec!["fresh"]));
@@ -51,7 +45,7 @@ fn stale_request_increments_ignored_results() {
     assert_eq!(r.ignored_results(), 1);
 
     assert!(r.complete_page_success(id2, vec!["fresh"], false, true, 3_000));
-    assert_eq!(r.ignored_results(), 1); // no increment for accepted result
+    assert_eq!(r.ignored_results(), 1);
 }
 
 #[test]
@@ -69,8 +63,6 @@ fn stale_failure_increments_ignored_results() {
     assert_eq!(r.ignored_results(), 1);
 }
 
-// ── 13. Two-phase protocol ─────────────────────────────────────────────
-
 #[test]
 fn accept_current_request_returns_guard_for_active_request() {
     let mut r = make_resource();
@@ -79,7 +71,7 @@ fn accept_current_request_returns_guard_for_active_request() {
     let id = r.begin_fetch_next(&mut seq, 1_000).unwrap();
     let guard = r.accept_current_request(id);
     assert!(guard.is_some());
-    assert!(r.active_request_id().is_none()); // cleared on accept
+    assert!(r.active_request_id().is_none());
 }
 
 #[test]
@@ -113,7 +105,6 @@ fn complete_failure_with_guard_preserves_pages() {
     let mut r = load_n_pages(1);
     let mut seq = RequestSequencer::new();
 
-    // load_n_pages sets has_next_page=false for the last page, re-enable
     r.set_has_next_page(true);
 
     let id = r.begin_fetch_next(&mut seq, 3_000).unwrap();

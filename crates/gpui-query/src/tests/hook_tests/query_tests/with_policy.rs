@@ -1,14 +1,8 @@
-//! Tests for the `*_with_policy` fetcher variant ("server wins"): a fetcher
-//! returning `Fetched<T>` can override the caller's per-query `CachePolicy` on
-//! success.
-
 use gpui::{AppContext as _, Entity, TestAppContext};
 
 use crate::core::{CachePolicy, Fetched, QueryError, QueryResource, QueryStatus};
 use crate::hook::*;
 use crate::tests::test_support::*;
-
-// ── use_query_with_policy ────────────────────────────────────────────────
 
 #[gpui::test]
 fn test_use_query_with_policy_overrides_cache_policy(cx: &mut TestAppContext) {
@@ -18,7 +12,6 @@ fn test_use_query_with_policy_overrides_cache_policy(cx: &mut TestAppContext) {
         entity: Entity<QueryResource<&'static str, QueryError>>,
     }
 
-    // Caller asks for NoCache; the fetcher (the "server") overrides to a TTL.
     let harness = cx.new(|cx| {
         let (entity, _sub) = use_query_with_policy(
             QueryOptions::new("override").cache_policy(CachePolicy::NoCache),
@@ -38,7 +31,6 @@ fn test_use_query_with_policy_overrides_cache_policy(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let resource = harness.read(cx).entity.read(cx);
         assert_eq!(resource.status(), QueryStatus::Success);
-        // Server wins: the resource's policy is the server's, not the caller's.
         assert_eq!(resource.cache_policy(), CachePolicy::Ttl { ttl_ms: 60_000 });
         assert_eq!(resource.data(), Some(&"data"));
     });
@@ -67,7 +59,6 @@ fn test_use_query_with_policy_none_keeps_caller_policy(cx: &mut TestAppContext) 
     cx.update(|cx| {
         let resource = harness.read(cx).entity.read(cx);
         assert_eq!(resource.status(), QueryStatus::Success);
-        // No server policy → the caller's policy is retained.
         assert_eq!(resource.cache_policy(), caller_policy);
         assert_eq!(resource.data(), Some(&"data"));
     });
@@ -81,8 +72,6 @@ fn test_use_query_with_policy_stale_while_revalidate_override(cx: &mut TestAppCo
         entity: Entity<QueryResource<u32, QueryError>>,
     }
 
-    // The server can hand back a StaleWhileRevalidate policy (e.g. parsed from
-    // `Cache-Control: max-age=30, stale-while-revalidate=60`).
     let server_policy = CachePolicy::StaleWhileRevalidate {
         ttl_ms: 30_000,
         stale_ms: 60_000,
@@ -109,8 +98,6 @@ fn test_use_query_with_policy_stale_while_revalidate_override(cx: &mut TestAppCo
     });
 }
 
-// ── fetch_query_with_policy (refetch path) ───────────────────────────────
-
 #[gpui::test]
 fn test_fetch_query_with_policy_overrides_on_refetch(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -119,10 +106,6 @@ fn test_fetch_query_with_policy_overrides_on_refetch(cx: &mut TestAppContext) {
         entity: Entity<QueryResource<&'static str, QueryError>>,
     }
 
-    // Start with a plain fetch using NoCache. NoCache (no TTL) is required so an
-    // immediate refetch is not short-circuited as a cache hit: `is_cache_fresh`
-    // uses an inclusive `age_ms <= ttl_ms` boundary, so any `Ttl` policy would
-    // treat a same-millisecond refetch as fresh and skip the fetch.
     let harness = cx.new(|cx| {
         let (entity, _sub) = use_query(
             QueryOptions::new("refetch-override").cache_policy(CachePolicy::NoCache),
@@ -141,7 +124,6 @@ fn test_fetch_query_with_policy_overrides_on_refetch(cx: &mut TestAppContext) {
         assert_eq!(resource.data(), Some(&"first"));
     });
 
-    // Refetch through the with_policy variant, overriding the policy to a TTL.
     harness.update(cx, |this, cx| {
         fetch_query_with_policy(
             &this.entity,
@@ -160,7 +142,6 @@ fn test_fetch_query_with_policy_overrides_on_refetch(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let resource = harness.read(cx).entity.read(cx);
         assert_eq!(resource.status(), QueryStatus::Success);
-        // Server wins on refetch: the resource's policy is now the server's TTL.
         assert_eq!(resource.cache_policy(), CachePolicy::Ttl { ttl_ms: 60_000 });
         assert_eq!(resource.data(), Some(&"second"));
     });

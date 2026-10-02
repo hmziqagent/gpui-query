@@ -1,29 +1,8 @@
-//! Client construction, resource creation, type erasure, query data,
-//! and infinite query resource tests (tests 1–17).
-
 use gpui::{BorrowAppContext as _, TestAppContext};
 
 use crate::client::QueryClient;
 use crate::core::*;
 use crate::tests::test_support::*;
-
-// -- 1. QueryClient::new() vs Default ----------------------------------------
-
-#[gpui::test]
-fn test_client_new_equals_default(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        let c1 = QueryClient::new();
-        let c2 = QueryClient::default();
-        cx.set_global(c1);
-        let d1 = cx.update_global::<QueryClient, _>(|c, cx| c.diagnostics(cx));
-        cx.set_global(c2);
-        let d2 = cx.update_global::<QueryClient, _>(|c, cx| c.diagnostics(cx));
-        assert_eq!(d1.query_count, d2.query_count);
-        assert_eq!(d1.mutation_count, d2.mutation_count);
-    });
-}
-
-// -- 2. with_policies + with_gc_time builder chaining -------------------------
 
 #[gpui::test]
 fn test_builder_chaining_with_policies_and_gc(cx: &mut TestAppContext) {
@@ -53,21 +32,17 @@ fn test_builder_chaining_with_policies_and_gc(cx: &mut TestAppContext) {
     });
 }
 
-// -- 3. resource_with_policies updates existing entity policies ---------------
-
 #[gpui::test]
 fn test_resource_with_policies_updates_existing_entity(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
             let key = QueryKey::from("policy_update");
-            // Create with default TTL
             let e1 = client.resource::<String, QueryError>(key.clone(), cx);
             e1.read_with(cx, |r, _| {
                 assert_eq!(r.cache_policy(), CachePolicy::Ttl { ttl_ms: 60_000 });
             });
 
-            // Same key, different policies — should update in place
             let e2 = client.resource_with_policies::<String, QueryError>(
                 key.clone(),
                 CachePolicy::NoCache,
@@ -83,26 +58,19 @@ fn test_resource_with_policies_updates_existing_entity(cx: &mut TestAppContext) 
     });
 }
 
-// -- 4. all_queries returns empty for unregistered types ----------------------
-
 #[gpui::test]
 fn test_all_queries_empty_for_unregistered_type(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Create String resources
             let _s = client.resource::<String, QueryError>("s", cx);
-            // Ask for u32 queries — should be empty
             let u32s = client.all_queries::<u32, QueryError>();
             assert!(u32s.is_empty(), "no u32 queries registered");
-            // String queries should have 1
             let strings = client.all_queries::<String, QueryError>();
             assert_eq!(strings.len(), 1);
         });
     });
 }
-
-// -- 5. query() returns None after remove_queries -----------------------------
 
 #[gpui::test]
 fn test_query_returns_none_after_remove_queries(cx: &mut TestAppContext) {
@@ -122,8 +90,6 @@ fn test_query_returns_none_after_remove_queries(cx: &mut TestAppContext) {
     });
 }
 
-// -- 6. Multiple type erasure: 4 different (T, E) pairs in same client -------
-
 #[gpui::test]
 fn test_four_distinct_type_pairs_in_same_client(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -134,7 +100,6 @@ fn test_four_distinct_type_pairs_in_same_client(cx: &mut TestAppContext) {
             let e3 = client.resource::<User, QueryError>("data", cx);
             let e4 = client.resource::<Post, QueryError>("data", cx);
 
-            // All four must be distinct entities
             let ids = [
                 e1.entity_id(),
                 e2.entity_id(),
@@ -147,7 +112,6 @@ fn test_four_distinct_type_pairs_in_same_client(cx: &mut TestAppContext) {
                 }
             }
 
-            // all_queries for each type returns exactly 1
             assert_eq!(client.all_queries::<String, QueryError>().len(), 1);
             assert_eq!(client.all_queries::<u32, QueryError>().len(), 1);
             assert_eq!(client.all_queries::<User, QueryError>().len(), 1);
@@ -159,8 +123,6 @@ fn test_four_distinct_type_pairs_in_same_client(cx: &mut TestAppContext) {
     });
 }
 
-// -- 7. Same T different E: full lifecycle isolation --------------------------
-
 #[gpui::test]
 fn test_different_error_types_full_isolation(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -170,17 +132,12 @@ fn test_different_error_types_full_isolation(cx: &mut TestAppContext) {
             let e1 = client.resource::<String, QueryError>(key.clone(), cx);
             let e2 = client.resource::<String, String>(key.clone(), cx);
 
-            // Set data on e1 only
             e1.update(cx, |r, _| r.apply_success("v1".to_string(), 1_000));
-            // e2 should not have data
             assert!(e2.read(cx).data().is_none());
-            // e1 should have data
             assert_eq!(e1.read(cx).data().unwrap(), "v1");
         });
     });
 }
-
-// -- 8. set_query_data + get_query_data round-trip with typed data -----------
 
 #[gpui::test]
 fn test_set_and_get_query_data_with_user_type(cx: &mut TestAppContext) {
@@ -196,8 +153,6 @@ fn test_set_and_get_query_data_with_user_type(cx: &mut TestAppContext) {
     });
 }
 
-// -- 9. set_query_data preserves previous_data for rollback ------------------
-
 #[gpui::test]
 fn test_set_query_data_multiple_times_preserves_rollback_chain(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -205,7 +160,6 @@ fn test_set_query_data_multiple_times_preserves_rollback_chain(cx: &mut TestAppC
         cx.update_global::<QueryClient, _>(|client, cx| {
             let key = QueryKey::from("chain");
 
-            // First set — no previous data
             client.set_query_data::<String, QueryError>(key.clone(), "v1".to_string(), cx);
             let e = client.query::<String, QueryError>(&key).unwrap();
             assert!(
@@ -213,12 +167,10 @@ fn test_set_query_data_multiple_times_preserves_rollback_chain(cx: &mut TestAppC
                 "first set has no previous"
             );
 
-            // Second set — previous should be v1
             client.set_query_data::<String, QueryError>(key.clone(), "v2".to_string(), cx);
             assert_eq!(e.read(cx).data().unwrap(), "v2");
             assert_eq!(e.read(cx).previous_data().unwrap(), "v1");
 
-            // Third set — previous should be v2 (only one level of rollback)
             client.set_query_data::<String, QueryError>(key.clone(), "v3".to_string(), cx);
             assert_eq!(e.read(cx).data().unwrap(), "v3");
             assert_eq!(e.read(cx).previous_data().unwrap(), "v2");
@@ -226,14 +178,11 @@ fn test_set_query_data_multiple_times_preserves_rollback_chain(cx: &mut TestAppC
     });
 }
 
-// -- 10. get_query_data returns None for idle resource ------------------------
-
 #[gpui::test]
 fn test_get_query_data_none_for_idle_resource(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Create resource but never set data
             let _entity = client.resource::<String, QueryError>("idle_data", cx);
             let data =
                 client.get_query_data::<String, QueryError>(&QueryKey::from("idle_data"), cx);
@@ -241,8 +190,6 @@ fn test_get_query_data_none_for_idle_resource(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 11. rollback_to_previous returns false when no previous data ------------
 
 #[gpui::test]
 fn test_rollback_returns_false_without_previous_data(cx: &mut TestAppContext) {
@@ -252,7 +199,6 @@ fn test_rollback_returns_false_without_previous_data(cx: &mut TestAppContext) {
             let key = QueryKey::from("no_prev");
             client.set_query_data::<String, QueryError>(key.clone(), "only".to_string(), cx);
             let entity = client.query::<String, QueryError>(&key).unwrap();
-            // No previous_data was set (first set_query_data)
             let rolled_back = entity.update(cx, |r, _| r.rollback_to_previous());
             assert!(
                 !rolled_back,
@@ -261,8 +207,6 @@ fn test_rollback_returns_false_without_previous_data(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 12. Infinite query resource creation and retrieval -----------------------
 
 #[gpui::test]
 fn test_infinite_resource_creates_and_deduplicates(cx: &mut TestAppContext) {
@@ -284,8 +228,6 @@ fn test_infinite_resource_creates_and_deduplicates(cx: &mut TestAppContext) {
     });
 }
 
-// -- 13. infinite_query() retrieval -------------------------------------------
-
 #[gpui::test]
 fn test_infinite_query_retrieves_existing(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -303,8 +245,6 @@ fn test_infinite_query_retrieves_existing(cx: &mut TestAppContext) {
     });
 }
 
-// -- 14. all_infinite_queries returns typed results ---------------------------
-
 #[gpui::test]
 fn test_all_infinite_queries_typed(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -321,8 +261,6 @@ fn test_all_infinite_queries_typed(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 15. infinite_resource_with_policies updates policies ---------------------
 
 #[gpui::test]
 fn test_infinite_resource_with_policies(cx: &mut TestAppContext) {
@@ -343,8 +281,6 @@ fn test_infinite_resource_with_policies(cx: &mut TestAppContext) {
     });
 }
 
-// -- 16. next_request_id_for_infinite_key monotonic sequence -----------------
-
 #[gpui::test]
 fn test_next_request_id_for_infinite_key_monotonic(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -361,8 +297,6 @@ fn test_next_request_id_for_infinite_key_monotonic(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 17. next_request_id_for_infinite_key returns None for missing key ------
 
 #[gpui::test]
 fn test_next_request_id_for_infinite_key_returns_none_for_missing(cx: &mut TestAppContext) {

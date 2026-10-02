@@ -1,14 +1,8 @@
-//! Query resource completion methods.
-
 use crate::core::{CachePolicy, QueryStatus, QueryTimestamp, RequestGuard, RequestId};
 
 use super::QueryResource;
 
 impl<T, E> QueryResource<T, E> {
-    /// Complete the current request with success by request id.
-    ///
-    /// Convenience method that accepts + completes in one call.
-    /// Returns `true` if the request was accepted.
     pub fn complete_current_success(
         &mut self,
         request_id: RequestId,
@@ -22,7 +16,6 @@ impl<T, E> QueryResource<T, E> {
         true
     }
 
-    /// Complete the current request with failure by request id.
     pub fn complete_current_failure(
         &mut self,
         request_id: RequestId,
@@ -36,7 +29,6 @@ impl<T, E> QueryResource<T, E> {
         true
     }
 
-    /// Complete the current request with optional success by request id.
     pub fn complete_current_optional_success(
         &mut self,
         request_id: RequestId,
@@ -50,7 +42,6 @@ impl<T, E> QueryResource<T, E> {
         true
     }
 
-    /// Complete the current request with failure but retain data by request id.
     pub fn complete_current_failure_with_data(
         &mut self,
         request_id: RequestId,
@@ -65,36 +56,23 @@ impl<T, E> QueryResource<T, E> {
         true
     }
 
-    /// Complete with success, consuming the guard (two-phase protocol).
-    ///
-    /// The guard is moved, preventing double-completion at the type level.
-    /// Validates that no new request was started after the guard was issued.
     pub fn complete_success(&mut self, guard: RequestGuard, data: T, now_ms: u64) {
         self.validate_guard(&guard);
         self.apply_success(data, now_ms);
     }
 
-    /// Complete with failure, consuming the guard (two-phase protocol).
-    ///
-    /// The guard is moved, preventing double-completion at the type level.
-    /// Validates that no new request was started after the guard was issued.
     pub fn complete_failure(&mut self, guard: RequestGuard, error: impl Into<E>, now_ms: u64) {
         self.validate_guard(&guard);
         self.apply_failure(error, now_ms);
     }
 
-    /// Complete with optional success, consuming the guard.
-    ///
-    /// If `data` is `None`, the status is set to [`QueryStatus::Idle`] rather than
-    /// [`QueryStatus::Success`] to maintain the invariant that Success implies data exists.
+    /// `None` data completes to [`QueryStatus::Idle`], not `Success`, keeping
+    /// the invariant that `Success` implies data exists.
     pub fn complete_success_optional(&mut self, guard: RequestGuard, data: Option<T>, now_ms: u64) {
         self.validate_guard(&guard);
         self.apply_success_optional(data, now_ms);
     }
 
-    /// Complete with failure but retain data, consuming the guard.
-    ///
-    /// Validates that no new request was started after the guard was issued.
     pub fn complete_failure_with_data(
         &mut self,
         guard: RequestGuard,
@@ -113,6 +91,7 @@ impl<T, E> QueryResource<T, E> {
         self.error = None;
         self.active_request_id = None;
         self.last_updated_at = Some(QueryTimestamp::from(now_ms));
+        self.data_epoch = self.data_epoch.saturating_add(1);
     }
 
     pub(crate) fn apply_failure(&mut self, error: impl Into<E>, now_ms: u64) {
@@ -124,9 +103,6 @@ impl<T, E> QueryResource<T, E> {
 
     pub(crate) fn apply_success_optional(&mut self, data: Option<T>, now_ms: u64) {
         self.previous_data = self.data.take();
-        // When data is None, use Idle instead of Success to maintain the
-        // invariant that Success always implies data is available. Callers
-        // that check status() == Success and then unwrap data() will not panic.
         if data.is_some() {
             self.status = QueryStatus::Success;
         } else {
@@ -136,6 +112,7 @@ impl<T, E> QueryResource<T, E> {
         self.error = None;
         self.active_request_id = None;
         self.last_updated_at = Some(QueryTimestamp::from(now_ms));
+        self.data_epoch = self.data_epoch.saturating_add(1);
     }
 
     pub(crate) fn apply_failure_with_data(&mut self, data: T, error: impl Into<E>, now_ms: u64) {
@@ -144,15 +121,11 @@ impl<T, E> QueryResource<T, E> {
         self.error = Some(error.into());
         self.active_request_id = None;
         self.last_updated_at = Some(QueryTimestamp::from(now_ms));
+        self.data_epoch = self.data_epoch.saturating_add(1);
     }
 
-    /// Validate that the guard is still valid for the current resource state.
-    ///
-    /// `accept_current_request` clears `active_request_id`, so we cannot compare
-    /// directly. However, if `active_request_id` is `Some`, it means a *new*
-    /// request was started after the guard was issued but before completion.
-    /// This indicates the caller interleaved `begin_request` between accept and
-    /// complete, which would overwrite the newer request's state with stale data.
+    /// `accept_current_request` clears `active_request_id`, so a `Some` here
+    /// means a `begin_request` was interleaved between accept and complete.
     fn validate_guard(&self, guard: &RequestGuard) {
         debug_assert!(
             self.active_request_id.is_none(),
@@ -165,11 +138,8 @@ impl<T, E> QueryResource<T, E> {
 }
 
 impl<T, E> QueryResource<T, E> {
-    /// Whether data should be evicted after observers consume it.
-    ///
-    /// Returns `true` when `CachePolicy::NoCache` is set, meaning stored data
-    /// will never be used for cache hits and should be cleared after delivery
-    /// to avoid holding it in memory indefinitely.
+    /// `NoCache` data can never produce a cache hit, so clear it after
+    /// observers consume it instead of holding it in memory.
     pub fn should_clear_data_on_complete(&self) -> bool {
         matches!(self.cache_policy, CachePolicy::NoCache)
     }

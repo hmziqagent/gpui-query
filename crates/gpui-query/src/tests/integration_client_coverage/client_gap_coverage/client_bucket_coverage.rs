@@ -1,8 +1,3 @@
-//! Client bucket coverage tests — Gaps 15, 16, 16b.
-//!
-//! Tests for mutation bucket type-mismatch downcast recovery and hook fallback
-//! paths when QueryClient global is not registered.
-
 use gpui::{AppContext as _, BorrowAppContext as _, Entity, TestAppContext};
 
 use crate::client::QueryClient;
@@ -11,17 +6,11 @@ use crate::core::*;
 use crate::hook::{InfiniteQueryOptions, mutate, use_infinite_query, use_mutation};
 use crate::tests::test_support::*;
 
-// -- Gap 15: MutationBucket type mismatch downcast recovery ------------------
-//
-// Verify that accessing the same key with different (V, T, E) types produces
-// separate mutation buckets (no collision).
-
 #[gpui::test]
 fn test_mutation_bucket_type_mismatch_creates_separate_buckets(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Register mutations with different type triples
             let m1 = cx.new(|_| {
                 MutationResource::<String, String, QueryError>::new(RetryPolicy::no_retries())
             });
@@ -46,17 +35,8 @@ fn test_mutation_bucket_type_mismatch_creates_separate_buckets(cx: &mut TestAppC
     });
 }
 
-// -- Gap 16: use_infinite_query without QueryClient global (fallback path) ---
-//
-// The code has a fallback that creates a standalone entity, but no test
-// exercises this path.
-
 #[gpui::test]
 fn test_use_infinite_query_without_query_client(cx: &mut TestAppContext) {
-    // Do NOT call setup_query_client — exercise the fallback path.
-    // In debug builds, use_infinite_query prints a warning but still creates
-    // a standalone entity.
-
     struct H {
         entity: Entity<InfiniteQueryResource<Vec<i32>, QueryError>>,
     }
@@ -80,11 +60,8 @@ fn test_use_infinite_query_without_query_client(cx: &mut TestAppContext) {
     });
 }
 
-// -- Gap 16b: use_mutation without QueryClient (still works) ----------------
-
 #[gpui::test]
 fn test_use_mutation_without_query_client(cx: &mut TestAppContext) {
-    // Do NOT call setup_query_client.
     struct H {
         mutation: Entity<MutationResource<String, String, QueryError>>,
     }
@@ -95,7 +72,6 @@ fn test_use_mutation_without_query_client(cx: &mut TestAppContext) {
         H { mutation: entity }
     });
 
-    // Mutate should still work
     harness.update(cx, |this, cx| {
         mutate(
             &this.mutation,

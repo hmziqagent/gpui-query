@@ -1,23 +1,4 @@
-//! Tests for InfiniteQueryResource advanced scenarios.
-//!
-//! Covers untested paths:
-//! - InfiniteQueryResource cross-direction replacement
-//! - InfiniteQueryResource cache_policy and request_policy setters
-//! - InfiniteQueryResource retry_policy and set_retry_policy
-//! - InfiniteQueryResource started_at / last_updated_at timestamps
-//! - InfiniteQueryResource cancelled_count tracking
-//! - InfiniteQueryResource error accessor after failure
-//! - InfiniteQueryResource key accessor
-//! - InfiniteQueryResource complete_success_with_guard for prepend
-//! - InfiniteQueryResource complete_failure_with_guard clears fetching flags
-//! - InfiniteQueryResource is_current_request
-//! - InfiniteQueryResource multiple pages loaded then failure on next
-//! - InfiniteQueryResource is_loading
-//! - InfiniteQueryResource active_request_id through lifecycle
-
 use crate::core::*;
-
-// ── InfiniteQueryResource: cross-direction replacement ───────────────────
 
 #[test]
 fn infinite_query_cross_direction_replaces_request() {
@@ -28,23 +9,19 @@ fn infinite_query_cross_direction_replaces_request() {
     );
     let mut seq = RequestSequencer::new();
 
-    // Start a next-page fetch
     let id_next = r.begin_fetch_next(&mut seq, 1_000).unwrap();
     assert!(r.is_fetching_next_page());
     assert!(!r.is_fetching_previous_page());
 
-    // Now start a previous-page fetch (cross-direction replacement under LatestWins)
     r.set_has_previous_page(true);
     let id_prev = r.begin_fetch_previous(&mut seq, 2_000).unwrap();
     assert!(!r.is_fetching_next_page(), "next flag should be cleared");
     assert!(r.is_fetching_previous_page());
     assert_eq!(r.cancelled_count(), 1, "previous request was cancelled");
 
-    // Completing the old next request should fail (stale)
     assert!(!r.complete_page_success(id_next, vec!["stale_next".to_string()], true, true, 3_000));
     assert_eq!(r.ignored_results(), 1);
 
-    // Completing the previous request should succeed
     assert!(r.complete_page_success(id_prev, vec!["page0".to_string()], false, false, 3_000));
     assert_eq!(r.page_count(), 1);
     assert_eq!(r.first_page(), Some(&vec!["page0".to_string()]));
@@ -72,8 +49,6 @@ fn infinite_query_cross_direction_previous_to_next() {
     assert!(r.complete_page_success(id_next, vec!["page1".to_string()], true, true, 3_000));
 }
 
-// ── InfiniteQueryResource: cache_policy and request_policy setters ───────
-
 #[test]
 fn infinite_query_set_cache_policy() {
     let mut r = InfiniteQueryResource::<Vec<String>>::new(
@@ -100,8 +75,6 @@ fn infinite_query_set_request_policy() {
     assert_eq!(r.request_policy(), RequestPolicy::IgnoreWhileLoading);
 }
 
-// ── InfiniteQueryResource: retry_policy ───────────────────────────────────
-
 #[test]
 fn infinite_query_default_retry_policy() {
     let r = InfiniteQueryResource::<Vec<String>>::new(
@@ -126,7 +99,24 @@ fn infinite_query_set_retry_policy() {
     assert_eq!(r.retry_policy(), &policy);
 }
 
-// ── InfiniteQueryResource: timestamps ─────────────────────────────────────
+#[test]
+fn infinite_query_reset_preserves_retry_policy() {
+    let mut r = InfiniteQueryResource::<Vec<String>>::new(
+        QueryKey::from("items"),
+        CachePolicy::Ttl { ttl_ms: 60_000 },
+        RequestPolicy::LatestWins,
+    );
+    let policy = RetryPolicy::new(10)
+        .with_delay(500)
+        .with_exponential_backoff();
+    r.set_retry_policy(policy.clone());
+    r.reset();
+    assert_eq!(
+        r.retry_policy(),
+        &policy,
+        "retry_policy should survive reset"
+    );
+}
 
 #[test]
 fn infinite_query_timestamps_on_lifecycle() {
@@ -153,8 +143,6 @@ fn infinite_query_timestamps_on_lifecycle() {
     assert_eq!(r.last_updated_at_ms(), Some(2_000));
 }
 
-// ── InfiniteQueryResource: cancelled_count tracking ───────────────────────
-
 #[test]
 fn infinite_query_cancelled_count_on_replacement() {
     let mut r = InfiniteQueryResource::<Vec<String>>::new(
@@ -173,8 +161,6 @@ fn infinite_query_cancelled_count_on_replacement() {
     let _id3 = r.begin_fetch_next(&mut seq, 3_000).unwrap();
     assert_eq!(r.cancelled_count(), 2);
 }
-
-// ── InfiniteQueryResource: error accessor ─────────────────────────────────
 
 #[test]
 fn infinite_query_error_after_failure() {
@@ -215,8 +201,6 @@ fn infinite_query_error_cleared_on_success() {
     assert!(r.error().is_none());
 }
 
-// ── InfiniteQueryResource: key accessor ───────────────────────────────────
-
 #[test]
 fn infinite_query_key_accessor() {
     let r = InfiniteQueryResource::<Vec<String>>::new(
@@ -227,8 +211,6 @@ fn infinite_query_key_accessor() {
     assert_eq!(r.key(), &QueryKey::from(["users", "42", "posts"]));
 }
 
-// ── InfiniteQueryResource: complete_success_with_guard for prepend ──────
-
 #[test]
 fn infinite_query_complete_success_with_guard_prepend() {
     let mut r = InfiniteQueryResource::<Vec<String>>::new(
@@ -238,11 +220,9 @@ fn infinite_query_complete_success_with_guard_prepend() {
     );
     let mut seq = RequestSequencer::new();
 
-    // First, add a page via next
     let id1 = r.begin_fetch_next(&mut seq, 1_000).unwrap();
     r.complete_page_success(id1, vec!["page1".to_string()], true, true, 2_000);
 
-    // Now prepend via two-phase protocol
     r.set_has_previous_page(true);
     let id2 = r.begin_fetch_previous(&mut seq, 3_000).unwrap();
     let guard = r.accept_current_request(id2).unwrap();
@@ -256,8 +236,6 @@ fn infinite_query_complete_success_with_guard_prepend() {
         "has_more=false sets has_previous_page=false"
     );
 }
-
-// ── InfiniteQueryResource: complete_failure_with_guard clears fetching flags
 
 #[test]
 fn infinite_query_complete_failure_with_guard_clears_flags() {
@@ -280,8 +258,6 @@ fn infinite_query_complete_failure_with_guard_clears_flags() {
     assert_eq!(r.status(), QueryStatus::Failure);
 }
 
-// ── InfiniteQueryResource: is_current_request ────────────────────────────
-
 #[test]
 fn infinite_query_is_current_request() {
     let mut r = InfiniteQueryResource::<Vec<String>>::new(
@@ -300,8 +276,6 @@ fn infinite_query_is_current_request() {
     assert_eq!(r.active_request_id(), Some(id2));
 }
 
-// ── InfiniteQueryResource: multiple pages loaded then failure on next ────
-
 #[test]
 fn infinite_query_multiple_pages_then_failure_does_not_clear_pages() {
     let mut r = InfiniteQueryResource::<Vec<String>>::new(
@@ -311,7 +285,6 @@ fn infinite_query_multiple_pages_then_failure_does_not_clear_pages() {
     );
     let mut seq = RequestSequencer::new();
 
-    // Load 3 pages
     let id1 = r.begin_fetch_next(&mut seq, 100).unwrap();
     r.complete_page_success(id1, vec!["a".to_string()], true, true, 200);
     let id2 = r.begin_fetch_next(&mut seq, 300).unwrap();
@@ -321,7 +294,6 @@ fn infinite_query_multiple_pages_then_failure_does_not_clear_pages() {
 
     assert_eq!(r.page_count(), 3);
 
-    // Fail on the 4th page
     let id4 = r.begin_fetch_next(&mut seq, 700).unwrap();
     r.complete_page_failure(id4, QueryError::transport("timeout"));
 
@@ -331,8 +303,6 @@ fn infinite_query_multiple_pages_then_failure_does_not_clear_pages() {
     assert_eq!(r.first_page(), Some(&vec!["a".to_string()]));
     assert_eq!(r.last_page(), Some(&vec!["c".to_string()]));
 }
-
-// ── InfiniteQueryResource: is_loading ─────────────────────────────────────
 
 #[test]
 fn infinite_query_is_loading_reflects_status() {
@@ -352,8 +322,6 @@ fn infinite_query_is_loading_reflects_status() {
     assert!(!r.is_loading());
 }
 
-// ── InfiniteQueryResource: active_request_id through lifecycle ───────────
-
 #[test]
 fn infinite_query_active_request_id_lifecycle() {
     let mut r = InfiniteQueryResource::<Vec<String>>::new(
@@ -368,7 +336,6 @@ fn infinite_query_active_request_id_lifecycle() {
     let id = r.begin_fetch_next(&mut seq, 1_000).unwrap();
     assert_eq!(r.active_request_id(), Some(id));
 
-    // Accept clears active_request_id
     let guard = r.accept_current_request(id).unwrap();
     assert!(r.active_request_id().is_none());
 

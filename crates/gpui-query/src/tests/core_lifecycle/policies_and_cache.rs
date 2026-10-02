@@ -1,16 +1,7 @@
-//! Request policies, stale data, cache behavior, and force fetch tests (sections 14-22).
-//!
-//! Covers: LatestWins, IgnoreWhileLoading, is_data_stale, optional success,
-//! CacheHit, StaleWhileRevalidate, begin_request_with_id, force fetch.
-
 use crate::core::*;
 use crate::tests::core_lifecycle::transitions::*;
 use crate::tests::test_support::*;
 use std::num::NonZero;
-
-// ═══════════════════════════════════════════════════════════════════════
-// 14. Double begin_loading: LatestWins cancels old request
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn latest_wins_second_begin_replaces_active_request() {
@@ -20,7 +11,6 @@ fn latest_wins_second_begin_replaces_active_request() {
     let (rid1, _) = begin(&mut r, &mut s, 100);
     let (rid2, _) = begin(&mut r, &mut s, 200);
 
-    // rid1 is no longer active
     assert_ne!(r.active_request_id(), Some(rid1));
     assert_eq!(r.active_request_id(), Some(rid2));
     assert_eq!(
@@ -29,15 +19,10 @@ fn latest_wins_second_begin_replaces_active_request() {
         "replaced request increments cancelled_count"
     );
 
-    // Completing rid2 succeeds
     assert!(r.complete_current_success(rid2, "fresh", 300));
     assert_eq!(r.status(), QueryStatus::Success);
     assert_eq!(r.data(), Some(&"fresh"));
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 15. Double begin_loading: IgnoreWhileLoading ignores second
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn ignore_while_loading_rejects_second_request() {
@@ -70,10 +55,6 @@ fn ignore_while_loading_rejects_second_request() {
         "no cancellation because request was ignored"
     );
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 16. Stale data check (is_data_stale)
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn is_data_stale_returns_true_when_loading_with_data() {
@@ -117,10 +98,6 @@ fn is_data_stale_returns_false_on_success() {
 
     assert!(!r.is_data_stale());
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 17. Optional success: None -> Idle (not Success)
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn optional_success_none_sets_idle_not_success() {
@@ -166,10 +143,6 @@ fn optional_success_none_clears_previous_data() {
     assert_eq!(r.previous_data(), Some(&"old"));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 18. Cache short-circuit: CacheHit result
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn cache_hit_returns_no_fetch_when_fresh() {
     let mut r = resource();
@@ -178,7 +151,6 @@ fn cache_hit_returns_no_fetch_when_fresh() {
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "data", 200));
 
-    // Within TTL (1000ms): should be a cache hit
     let result = r.begin_request(&mut s, 500, QueryFetchMode::Normal);
 
     assert_eq!(result, QueryBeginResult::CacheHit);
@@ -186,10 +158,6 @@ fn cache_hit_returns_no_fetch_when_fresh() {
     assert_eq!(r.data(), Some(&"data"));
     assert_eq!(r.cache_hits(), 1);
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 19. Stale-while-revalidate: StaleCacheHit result
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn stale_while_revalidate_serves_stale_and_starts_background() {
@@ -206,7 +174,6 @@ fn stale_while_revalidate_serves_stale_and_starts_background() {
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "stale-data", 200));
 
-    // At t=800: past TTL (500) but within stale window (500+1000=1500)
     let result = r.begin_request(&mut s, 800, QueryFetchMode::Normal);
 
     match result {
@@ -229,10 +196,6 @@ fn stale_while_revalidate_serves_stale_and_starts_background() {
     );
     assert_eq!(r.cache_hits(), 1);
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 20. begin_request_with_id variant
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn begin_request_with_id_uses_provided_id() {
@@ -258,16 +221,15 @@ fn begin_request_with_id_none_uses_transient_sequencer() {
 
     match result {
         QueryBeginResult::Started { request_id, .. } => {
-            // Transient sequencer starts at scope 1, sequence 1
-            assert_eq!(request_id, RequestId::scoped(NonZero::new(1).unwrap(), 1));
+            assert_eq!(
+                request_id.scope_id(),
+                RequestSequencer::RESERVED_FALLBACK_SCOPE
+            );
+            assert_eq!(request_id.value(), 1);
         }
         _ => panic!("expected Started"),
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 21. Force fetch mode bypasses cache
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn force_fetch_mode_bypasses_fresh_cache() {
@@ -277,7 +239,6 @@ fn force_fetch_mode_bypasses_fresh_cache() {
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "data", 200));
 
-    // Even though cache is fresh (t=300 < TTL 1000), force fetch should proceed
     let result = r.begin_request(&mut s, 300, QueryFetchMode::Force);
 
     match result {
@@ -285,10 +246,6 @@ fn force_fetch_mode_bypasses_fresh_cache() {
         _ => panic!("expected Started with Force mode, got {:?}", result),
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 22. Optimistic update: set_data / clear_data / rollback
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn set_data_saves_previous_for_rollback() {

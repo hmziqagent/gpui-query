@@ -63,21 +63,28 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/gpui-query/Cargo.toml
           # Keep the version literal in sync across the install snippets that
           # external systems render statically (crates.io README, GitHub README,
-          # docs installation page). Mirrors the Cargo.toml bump above; both the
-          # bare `gpui-query = "x.y.z"` and table `version = "x.y.z"` forms.
+          # docs installation page, skill docs). Mirrors the Cargo.toml bump
+          # above: bare and table `version = "x.y.z"` forms plus the two skill
+          # prose forms `gpui-query (vx.y.z)` and `gpui-query` vx.y.z. Every
+          # pattern anchors on `gpui-query` itself, so the -http and -persist
+          # satellite pins are never touched.
           sed -i -E \
             -e 's|gpui-query = "[^"]*"|gpui-query = "'"$VERSION"'"|g' \
             -e 's|gpui-query = [{] version = "[^"]*"|gpui-query = { version = "'"$VERSION"'"|g' \
+            -e 's|gpui-query \(v[0-9]+\.[0-9]+\.[0-9]+\)|gpui-query (v'"$VERSION"')|g' \
+            -e 's|gpui-query` v[0-9]+\.[0-9]+\.[0-9]+|gpui-query` v'"$VERSION"'|g' \
             README.md \
             crates/gpui-query/README.md \
-            web/src/content/docs/docs/getting-started/installation.mdx
+            web/src/content/docs/docs/getting-started/installation.mdx \
+            skills/gpui-query/SKILL.md \
+            skills/gpui-query-extensions/SKILL.md
 
       - name: Commit version bump
         if: steps.check_tag.outputs.exists == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add crates/gpui-query/Cargo.toml README.md crates/gpui-query/README.md web/src/content/docs/docs/getting-started/installation.mdx
+          git add crates/gpui-query/Cargo.toml README.md crates/gpui-query/README.md web/src/content/docs/docs/getting-started/installation.mdx skills/gpui-query/SKILL.md skills/gpui-query-extensions/SKILL.md
           git diff --cached --quiet || git commit -m "chore: bump gpui-query version to v${{ steps.changelog.outputs.version }}"
 
       - name: Create Git tag

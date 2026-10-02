@@ -4,50 +4,51 @@
 
 Async state management for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), inspired by [TanStack Query](https://tanstack.com/query).
 
-Fetch, cache, and synchronize async data in GPUI applications without manual lifecycle management. Built for the framework that powers the [Zed editor](https://zed.dev).
+Fetch, cache, and synchronize async data in GPUI applications without hand-rolling the lifecycle. GPUI is the framework behind the [Zed editor](https://zed.dev).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## what it is
 
-GPUI renders synchronously on the main thread. That makes async data fetching awkward: you need to track loading states, handle errors, cache responses, deduplicate concurrent requests, and retry on failure. gpui-query handles all of it.
+GPUI renders synchronously on the main thread. That makes async data awkward: you have to track loading states, handle errors, cache responses, deduplicate concurrent requests, and retry on failure. gpui-query handles all of it.
 
-You write a fetcher function. The library manages caching, retry, deduplication, stale-while-revalidate, garbage collection, and cooperative cancellation. It works with GPUI's `Entity` and `ViewContext` system, not against it.
+You write a fetcher function. The library manages caching, retry, deduplication, stale-while-revalidate, garbage collection, and cooperative cancellation on top of GPUI's `Entity` system.
 
-The API mirrors what TanStack Query popularized in the JavaScript ecosystem: `use_query`, `use_mutation`, and `use_infinite_query` hooks that return `Entity` handles you read from in your view's `render` method.
+The API mirrors TanStack Query: `use_query`, `use_mutation`, and `use_infinite_query` hooks that return `Entity` handles you read from in your view's `render` method.
 
 ## install
 
 ```toml
 [dependencies]
-gpui-query = "0.2.0"
+gpui-query = "0.2.2"
 ```
 
 This pulls in the `client` layer (which includes `core`). To use the declarative hooks:
 
 ```toml
 [dependencies]
-gpui-query = { version = "0.2.0", features = ["hook"] }
+gpui-query = { version = "0.2.2", features = ["hook"] }
 ```
 
 To use only the core state machine with no GPUI dependency:
 
 ```toml
 [dependencies]
-gpui-query = { version = "0.2.0", default-features = false, features = ["core"] }
+gpui-query = { version = "0.2.2", default-features = false, features = ["core"] }
 ```
 
-The `core` layer also builds for `wasm32-unknown-unknown` — the crate handles the wasm-specific setup internally (ahash switches to compile-time RNG on wasm targets), so no consumer configuration is needed. The `client`, `hook`, and `persist` layers are native-only: they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+The `core` layer also builds for `wasm32-unknown-unknown`; the wasm-specific setup (ahash switches to compile-time RNG on wasm targets) is handled internally. The `client`, `hook`, and `persist` layers are native-only: they depend on `gpui`, which does not build for wasm.
 
 ## quick start
 
-Set up the `QueryClient` as a GPUI global during app initialization:
+Set up the `QueryClient` as a GPUI global when your app starts:
 
-```rust
-use gpui::App;
+```rust,no_run
+use gpui::Application;
+# use gpui::BorrowAppContext;
 use gpui_query::QueryClient;
 
-App::new().run(|cx| {
+Application::new().run(|cx| {
     cx.set_global(QueryClient::new());
     // ... your views
 });
@@ -55,10 +56,20 @@ App::new().run(|cx| {
 
 Fetch data with `use_query`:
 
-```rust
-use gpui_query::{use_query, QueryOptions};
+```rust,no_run
+use gpui_query::use_query;
+# use gpui::{Context, Entity, Subscription};
+# use gpui_query::QueryResource;
+# struct MyView;
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# async fn fetch_users() -> Result<Vec<User>, MyError> {
+#     Ok(vec![])
+# }
 
-fn setup_query(cx: &mut ViewContext<MyView>) -> (Entity<QueryResource<Vec<User>, MyError>>, Subscription) {
+fn setup_query(cx: &mut Context<MyView>) -> (Entity<QueryResource<Vec<User>, MyError>>, Subscription) {
     use_query(
         "users",
         |signal| async move {
@@ -73,18 +84,27 @@ fn setup_query(cx: &mut ViewContext<MyView>) -> (Entity<QueryResource<Vec<User>,
 
 Read the state in your render method:
 
-```rust
-fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
-    let entity = self.query_entity.clone();
-    entity.read_with(cx, |resource| {
-        match resource.status() {
-            QueryStatus::LoadingEmpty => "Loading...",
-            QueryStatus::Success => "Got data",
-            QueryStatus::Failure => "Error",
-            _ => "Idle",
-        }
-    })
-}
+```rust,no_run
+# use gpui::{Context, Entity};
+# use gpui_query::{QueryResource, QueryStatus};
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# struct MyView {
+#     query_entity: Entity<QueryResource<Vec<User>, MyError>>,
+# }
+# impl MyView {
+#     fn label(&self, cx: &Context<Self>) -> &'static str {
+let label = self.query_entity.read_with(cx, |resource, _| match resource.status() {
+    QueryStatus::LoadingEmpty => "Loading...",
+    QueryStatus::Success => "Got data",
+    QueryStatus::Failure => "Error",
+    _ => "Idle",
+});
+#         label
+#     }
+# }
 ```
 
 ## architecture
@@ -112,8 +132,19 @@ persist = ["client", "hook", "dep:serde_json", "dep:thiserror"]
 
 The primary hook. Pass a key (string or `QueryOptions`), a fetcher function, and the view context. The fetcher receives a `QuerySignal` for cooperative cancellation.
 
-```rust
+```rust,no_run
 use gpui_query::{use_query, QueryOptions, CachePolicy, RetryPolicy};
+# use gpui::Context;
+# use gpui_query::QuerySignal;
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# fn doc<C: 'static, F, Fut>(cx: &mut Context<C>, fetcher: F)
+# where
+#     F: Fn(QuerySignal) -> Fut + Copy + Send + 'static,
+#     Fut: std::future::Future<Output = Result<Vec<User>, MyError>> + Send + 'static,
+# {
 
 // Simple key
 let (entity, sub) = use_query("users", fetcher, cx);
@@ -126,16 +157,36 @@ let (entity, sub) = use_query(
     fetcher,
     cx,
 );
+# let _ = (entity, sub);
+# }
 ```
 
-`QueryResource<T,E>` tracks the full lifecycle: idle, loading (with or without previous data), success, failure, or cancelled. You get `data()`, `error()`, `status()`, `is_loading()`, `has_data()`, `display_data()` (returns data or a placeholder), `cache_age_ms()`, and `retry_count()`.
+`QueryResource<T,E>` tracks the full lifecycle: idle, loading (with or without previous data), success, failure, or cancelled. You get `data()`, `error()`, `status()`, `is_loading()`, `has_data()`, `cache_age_ms(now_ms)`, and `retry_count()`.
 
 For manual control with no auto-fetch, use `use_query_manual` and trigger fetches with `fetch_query` when you're ready.
 
 ## mutations
 
-```rust
+```rust,no_run
 use gpui_query::{use_mutation, mutate, MutationCallbacks};
+# use gpui::Context;
+# use gpui_query::mutate_with_callbacks;
+# #[derive(Clone)]
+# struct NewUser {
+#     name: &'static str,
+# }
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# async fn create_user(vars: NewUser) -> User {
+#     let _ = vars;
+#     User
+# }
+# fn doc<C: 'static>(cx: &mut Context<C>) {
+#     let variables = NewUser { name: "Ada" };
+#     let mutator =
+#         |vars: NewUser| async move { Ok::<User, MyError>(create_user(vars).await) };
 
 let (entity, sub) = use_mutation((), cx);
 
@@ -154,6 +205,7 @@ mutate_with_callbacks(
         .on_error(|err| eprintln!("mutation failed: {err:?}")),
     cx,
 );
+# }
 ```
 
 Mutations track their own state in `MutationResource<V,T,E>` with a begin/complete/retry/reset lifecycle. They don't touch the query cache unless you explicitly invalidate queries in an `on_success` callback.
@@ -162,18 +214,42 @@ Mutations track their own state in `MutationResource<V,T,E>` with a begin/comple
 
 For paginated data. The fetcher receives the last page (or `None` for the first request) and returns `(page_data, has_more)`.
 
-```rust
-use gpui_query::{use_infinite_query, InfiniteQueryOptions, QueryKey};
+```rust,no_run
+use gpui_query::{use_infinite_query, InfiniteQueryOptions};
+# use gpui::Context;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# #[derive(Clone)]
+# struct Page {
+#     cursor: u32,
+# }
+# impl Page {
+#     fn cursor(&self) -> u32 {
+#         self.cursor
+#     }
+# }
+# struct FetchedPage {
+#     items: Page,
+#     has_more: bool,
+# }
+# async fn fetch_page(cursor: Option<u32>) -> Result<FetchedPage, MyError> {
+#     let _ = cursor;
+#     Ok(FetchedPage { items: Page { cursor: 0 }, has_more: false })
+# }
+# fn doc<C: 'static>(cx: &mut Context<C>) {
 
 let (entity, sub) = use_infinite_query(
-    InfiniteQueryOptions::new(QueryKey::from(["feed"])).max_pages(Some(10)),
-    |last_page| async move {
+    InfiniteQueryOptions::new("feed").max_pages(10),
+    |last_page: Option<&Page>| {
         let cursor = last_page.map(|p| p.cursor());
-        let page = fetch_page(cursor).await?;
-        Ok::<_, MyError>((page.items, page.has_more))
+        async move {
+            let page = fetch_page(cursor).await?;
+            Ok::<_, MyError>((page.items, page.has_more))
+        }
     },
     cx,
 );
+# }
 ```
 
 Pages are stored in a `VecDeque`. Default cap is 50 pages, configurable via `max_pages()`. Supports bidirectional fetching with `fetch_next_page_infinite` and `fetch_previous_page_infinite`.
@@ -188,18 +264,29 @@ Three policies:
 
 Bulk operations on the `QueryClient`:
 
-```rust
-let client = cx.global::<QueryClient>();
+```rust,no_run
+# use gpui::App;
+# use gpui::AppContext;
+# use gpui::BorrowAppContext;
+# use gpui_query::client::QueryClient;
+# use gpui_query::{QueryKey, QueryKeyFilter};
+# #[derive(Clone)]
+# struct User;
+# #[derive(Clone, Debug)]
+# struct MyError;
+# fn doc(cx: &mut App, new_user: User) {
+cx.update_global::<QueryClient, _>(|client, cx| {
+    // Invalidate all queries with a matching key prefix
+    client.invalidate_queries(&QueryKeyFilter::Prefix(&QueryKey::from(["users"])), cx);
 
-// Invalidate all queries with a matching key prefix
-client.invalidate_queries(&QueryKeyFilter::Prefix(&QueryKey::from(["users"])), cx);
+    // Remove everything
+    client.remove_queries(&QueryKeyFilter::All);
 
-// Remove everything
-client.remove_queries(&QueryKeyFilter::All, cx);
-
-// Optimistic update
-client.set_query_data::<Vec<User>, MyError>(&key, Some(vec![new_user]), cx);
-client.rollback_query_data::<Vec<User>, MyError>(&key, cx);
+    // Optimistic update; the previous value is kept for the resource's
+    // rollback_to_previous()
+    client.set_query_data::<Vec<User>, MyError>("users", vec![new_user], cx);
+});
+# }
 ```
 
 Invalidation matching supports `Exact`, `Prefix`, and `All` filters via `QueryKeyFilter`.
@@ -219,25 +306,31 @@ let policy = RetryPolicy::new(5)          // max retries
     .with_max_delay(60_000);               // cap at 60s
 ```
 
-Retry delay is `base * 2^attempt`, capped at `max_delay`. The fetcher's `QuerySignal` is checked between attempts so cancelled queries stop retrying immediately.
+Retry delay is `base * 2^attempt`, capped at `max_delay`. The fetcher's `QuerySignal` is checked between attempts, so cancelled queries stop retrying immediately.
 
 ## persistence
 
 Enable the `persist` feature to save and restore the cache across restarts. Implement the async `Persister` trait, then drive it with `QueryClient::persist_with` (debounced snapshot saves) and the free `hydrate` function (cold-start restore):
 
-```rust
+```rust,no_run
 use std::time::Duration;
 use gpui_query::client::{
     QueryClient, Persister, PersistSnapshot, PersistError, PersistOptions, PersistFilter,
 };
+# use gpui::App;
 
 struct MyPersister; // your backend: file, db, kv, …
 
 impl Persister for MyPersister {
-    async fn load(&self) -> Result<PersistSnapshot, PersistError> { /* … */ }
-    async fn save(&self, _snapshot: &PersistSnapshot) -> Result<(), PersistError> { /* … */ }
+    async fn load(&self) -> Result<PersistSnapshot, PersistError> {
+        Ok(PersistSnapshot::new())
+    }
+    async fn save(&self, _snapshot: &PersistSnapshot) -> Result<(), PersistError> {
+        Ok(())
+    }
 }
 
+# async fn doc(mut client: &mut QueryClient, cx: &mut App) {
 // Debounced saves: coalesces bursts of cache mutations into one snapshot.
 let _handle = client.persist_with(MyPersister, PersistOptions::default(), cx);
 
@@ -245,17 +338,18 @@ let _handle = client.persist_with(MyPersister, PersistOptions::default(), cx);
 gpui_query::client::hydrate(
     &mut client, &MyPersister, &PersistFilter::All, Duration::from_secs(86_400), cx,
 ).await.ok();
+# }
 ```
 
 Only `Success` entries with a registered serializer are persisted; the typed round-trip is driven by `QueryClient::register_serializer` / `register_deserializer`. The companion crate **`gpui-query-persist`** ships a ready-made atomic disk adapter (`FilePersister`). See the [Persistence guide](https://gpui-query.freeoxide.com/docs/guides/persistence).
 
 ## other things worth knowing
 
-`QueryObserver` and `MutationObserver` wrap entities and only call `cx.notify()` when the status changes. This avoids unnecessary re-renders.
+`QueryObserver` and `MutationObserver` wrap entities and only call `cx.notify()` when the status changes, which keeps unrelated views from re-rendering.
 
 `QueryError::sanitized()` redacts connection strings, bearer tokens, file paths, emails, and hex keys from error messages. Useful for logging without leaking secrets.
 
-`use_query_select` projects a `QueryResource<T,E>` through a `SelectTransform<T,U>` to produce a `MappedQueryResource` that derives values from cached data. No extra fetches are needed.
+`use_query_select` projects a `QueryResource<T,E>` through a `SelectTransform<T,U>` to produce a `MappedQueryResource` that derives values from cached data.
 
 `ClientDiagnostic`, `QueryDiagnostic`, and `MutationDiagnostic` give you runtime introspection of the query client's internal state for debugging.
 
@@ -265,10 +359,10 @@ Garbage collection runs on idle resources older than `gc_time_ms` (default: 5 mi
 
 ## claude code skills
 
-Two installable [Claude Code](https://claude.com/claude-code) skills ship in this repo under [`skills/`](./skills) — knowledge packs that teach an AI assistant the real gpui-query API (signatures, defaults, lifecycle, gotchas) so it writes correct hooks, caching, retry, and persistence code instead of guessing.
+Two [Claude Code](https://claude.com/claude-code) skills ship in this repo under [`skills/`](./skills). They teach an AI assistant the real gpui-query API (signatures, defaults, lifecycle, gotchas) so it writes correct hooks, caching, retry, and persistence code.
 
-- **`gpui-query`** — the essentials: `use_query` / `use_mutation` / `use_infinite_query` / `use_query_select`, in-memory `CachePolicy`, `RetryPolicy`, `QueryKey` filters, `QueryClient` bulk ops, observers, GC.
-- **`gpui-query-extensions`** — the satellites: HTTP `Cache-Control` → `CachePolicy` + `HttpCache` (`gpui-query-http`), and durable disk persistence with `FilePersister` + the `persist` feature (`gpui-query-persist`).
+- `gpui-query`: the essentials. `use_query` / `use_mutation` / `use_infinite_query` / `use_query_select`, in-memory `CachePolicy`, `RetryPolicy`, `QueryKey` filters, `QueryClient` bulk ops, observers, GC.
+- `gpui-query-extensions`: the satellites. HTTP `Cache-Control` → `CachePolicy` + `HttpCache` (`gpui-query-http`), and durable disk persistence with `FilePersister` + the `persist` feature (`gpui-query-persist`).
 
 Install both globally (available in every project), from a clone of the repo:
 
@@ -284,7 +378,7 @@ curl -fsSL https://raw.githubusercontent.com/freeoxide/gpui-query/master/skills/
   -o ~/.claude/skills/gpui-query/SKILL.md
 ```
 
-Once installed, the skills activate automatically when you work on a GPUI app that depends on gpui-query — no manual invocation needed. See the [Claude Code skills guide](https://gpui-query.freeoxide.com/docs/guides/claude-skills) for details.
+Once installed, the skills activate automatically whenever you work on a GPUI app that depends on gpui-query. See the [Claude Code skills guide](https://gpui-query.freeoxide.com/docs/guides/claude-skills) for details.
 
 ## links
 

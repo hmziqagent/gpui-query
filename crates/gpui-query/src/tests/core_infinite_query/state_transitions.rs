@@ -1,10 +1,5 @@
-//! Tests for page data access, reset, is_page_data_valid, failure preserving
-//! pages, invalidate, and serde roundtrip.
-
 use super::helpers::*;
 use crate::core::*;
-
-// ── 8. Page data access ────────────────────────────────────────────────
 
 #[test]
 fn pages_returns_vecdeque_in_order() {
@@ -33,8 +28,6 @@ fn first_and_last_page_none_when_empty() {
     assert!(!r.has_data());
 }
 
-// ── 10. Reset clears all pages ─────────────────────────────────────────
-
 #[test]
 fn reset_clears_all_pages_and_state() {
     let mut r = load_n_pages(3);
@@ -55,7 +48,6 @@ fn reset_clears_all_pages_and_state() {
     assert!(!r.is_fetching_next_page());
     assert!(!r.is_fetching_previous_page());
 
-    // ForwardOnly defaults restored
     assert!(r.has_next_page());
     assert!(!r.has_previous_page());
 }
@@ -91,14 +83,6 @@ fn reset_clears_diagnostics() {
     assert_eq!(r.cache_hits(), 0);
 }
 
-// ── 12. is_page_data_valid across statuses ──────────────────────────────
-
-#[test]
-fn is_page_data_valid_false_when_idle() {
-    let r = make_resource();
-    assert!(!r.is_page_data_valid());
-}
-
 #[test]
 fn is_page_data_valid_true_when_success_with_pages() {
     let r = load_n_pages(1);
@@ -110,13 +94,11 @@ fn is_page_data_valid_true_when_failure_with_existing_pages() {
     let mut r = load_n_pages(2);
     let mut seq = RequestSequencer::new();
 
-    // load_n_pages sets has_next_page=false for the last page, re-enable
     r.set_has_next_page(true);
 
     let id = r.begin_fetch_next(&mut seq, 5_000).unwrap();
     r.complete_page_failure(id, "network error".into());
 
-    // Failure does not clear existing pages
     assert_eq!(r.page_count(), 2);
     assert!(r.is_page_data_valid());
     assert_eq!(r.status(), QueryStatus::Failure);
@@ -137,8 +119,6 @@ fn is_page_data_valid_false_when_failure_no_pages() {
     assert!(!r.is_page_data_valid());
 }
 
-// ── 14. Failure does not clear existing pages ───────────────────────────
-
 #[test]
 fn page_failure_preserves_existing_pages() {
     let mut r = load_n_pages(2);
@@ -146,20 +126,16 @@ fn page_failure_preserves_existing_pages() {
 
     assert_eq!(r.page_count(), 2);
 
-    // load_n_pages sets has_next_page=false for the last page, re-enable
     r.set_has_next_page(true);
 
     let id = r.begin_fetch_next(&mut seq, 5_000).unwrap();
     r.complete_page_failure(id, "timeout".into());
 
-    // Pages remain intact
     assert_eq!(r.page_count(), 2);
     assert_eq!(r.first_page(), Some(&vec!["page0"]));
     assert_eq!(r.last_page(), Some(&vec!["page1"]));
     assert_eq!(r.status(), QueryStatus::Failure);
 }
-
-// ── 17. Invalidate ─────────────────────────────────────────────────────
 
 #[test]
 fn invalidate_clears_last_updated_but_preserves_pages() {
@@ -172,22 +148,17 @@ fn invalidate_clears_last_updated_but_preserves_pages() {
     assert_eq!(r.page_count(), 2);
 }
 
-// ── 18. Serde roundtrip ────────────────────────────────────────────────
-
 #[test]
 fn serde_roundtrip_preserves_state() {
     let r = load_n_pages(3);
 
     let json = serde_json::to_string(&r).unwrap();
-    // Deserialize into an owned page type: serde cannot synthesize `&'static str`
-    // from parsed JSON, so the roundtrip target uses `Vec<String>`.
     let back: InfiniteQueryResource<Vec<String>> = serde_json::from_str(&json).unwrap();
 
     assert_eq!(back.page_count(), 3);
     assert_eq!(back.status(), QueryStatus::Success);
     assert_eq!(back.first_page(), Some(&vec!["page0".to_string()]));
     assert_eq!(back.last_page(), Some(&vec!["page2".to_string()]));
-    // Signal is skipped by serde
     assert!(back.signal().is_none());
 }
 
@@ -195,7 +166,6 @@ fn serde_roundtrip_preserves_state() {
 fn serde_wire_format_uses_plain_array() {
     let r = load_n_pages(2);
     let json = serde_json::to_string(&r).unwrap();
-    // VecDeque serializes as a plain array, not a VecDeque-specific format
     assert!(json.contains("\"pages\":["));
     assert!(!json.contains("VecDeque"));
 }

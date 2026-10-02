@@ -17,6 +17,11 @@ test:
 test-feature feature:
     cargo test --features "{{ feature }}"
 
+# Run the release-profile gate (mirrors the cargo-release job in Cargo Test CI)
+release-check:
+    cargo build --all-features --release
+    cargo clippy --all-features --all-targets --release -- -D warnings
+
 # ---- Wasm ----
 
 # Verify the wasm compile boundary (mirrors the Wasm Check CI workflow):

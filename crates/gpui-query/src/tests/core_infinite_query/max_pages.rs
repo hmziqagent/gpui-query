@@ -1,9 +1,5 @@
-//! Tests for max_pages enforcement, edge cases, and evicted pages returns.
-
 use super::helpers::*;
 use crate::core::*;
-
-// ── 4. max_pages enforcement ────────────────────────────────────────────
 
 #[test]
 fn max_pages_evicts_oldest_page_on_append() {
@@ -16,7 +12,6 @@ fn max_pages_evicts_oldest_page_on_append() {
     let id2 = r.begin_fetch_next(&mut seq, 3_000).unwrap();
     r.complete_page_success(id2, vec!["b"], true, true, 4_000);
 
-    // Third page exceeds max_pages=2, evicts oldest ("a")
     let id3 = r.begin_fetch_next(&mut seq, 5_000).unwrap();
     r.complete_page_success(id3, vec!["c"], false, true, 6_000);
 
@@ -36,7 +31,6 @@ fn max_pages_evicts_newest_page_on_prepend() {
     let id2 = r.begin_fetch_next(&mut seq, 3_000).unwrap();
     r.complete_page_success(id2, vec!["b"], true, true, 4_000);
 
-    // Prepend a page: ["c", "a", "b"] enforced to 2 removes from back => ["c", "a"]
     r.set_has_previous_page(true);
     let id3 = r.begin_fetch_previous(&mut seq, 5_000).unwrap();
     r.complete_page_success(id3, vec!["c"], false, false, 6_000);
@@ -46,13 +40,10 @@ fn max_pages_evicts_newest_page_on_prepend() {
     assert_eq!(r.pages()[1].as_ref(), &vec!["a"]);
 }
 
-// ── 5. max_pages edge cases ─────────────────────────────────────────────
-
 #[test]
 fn max_pages_zero_treated_as_unbounded() {
     let mut r = load_n_pages(3);
 
-    // v2 audit 2: Some(0) is treated as None (unbounded) — no eviction
     r.set_max_pages(Some(0));
     assert_eq!(r.max_pages(), None);
     assert_eq!(r.page_count(), 3);
@@ -69,7 +60,6 @@ fn max_pages_one_retains_only_latest_page() {
     let id2 = r.begin_fetch_next(&mut seq, 3_000).unwrap();
     r.complete_page_success(id2, vec!["b"], true, true, 4_000);
 
-    // Only the last page is retained
     assert_eq!(r.page_count(), 1);
     assert_eq!(r.first_page(), Some(&vec!["b"]));
     assert_eq!(r.last_page(), Some(&vec!["b"]));
@@ -87,7 +77,6 @@ fn max_pages_50_allows_50_pages_and_evicts_on_51st() {
     assert_eq!(r.max_pages(), Some(50));
     let mut seq = RequestSequencer::new();
 
-    // Static page labels "p0".."p50" (T9: avoids per-page format! allocation).
     const P_LABELS: [&str; 51] = [
         "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12", "p13",
         "p14", "p15", "p16", "p17", "p18", "p19", "p20", "p21", "p22", "p23", "p24", "p25", "p26",
@@ -95,21 +84,13 @@ fn max_pages_50_allows_50_pages_and_evicts_on_51st() {
         "p40", "p41", "p42", "p43", "p44", "p45", "p46", "p47", "p48", "p49", "p50",
     ];
 
-    // Load 50 pages — all with has_more=true so has_next_page stays true
     for (i, label) in P_LABELS.iter().enumerate().take(50) {
         let id = r.begin_fetch_next(&mut seq, (i * 100) as u64).unwrap();
-        r.complete_page_success(
-            id,
-            vec![*label],
-            true, // always report more pages available
-            true,
-            ((i + 1) * 100) as u64,
-        );
+        r.complete_page_success(id, vec![*label], true, true, ((i + 1) * 100) as u64);
     }
     assert_eq!(r.page_count(), 50);
     assert_eq!(r.first_page(), Some(&vec!["p0"]));
 
-    // 51st page evicts p0
     let id51 = r.begin_fetch_next(&mut seq, 5_000_000).unwrap();
     r.complete_page_success(id51, vec!["p50"], false, true, 5_000_100);
     assert_eq!(r.page_count(), 50);

@@ -1,12 +1,6 @@
-//! TTL cache policy, StaleWhileRevalidate, and NoCache tests.
-
 use crate::core::*;
 use crate::tests::core_cache::*;
 use crate::tests::test_support::test_sequencer;
-
-// ══════════════════════════════════════════════════════════════════════════
-// TTL CACHE POLICY
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn ttl_cache_is_fresh_at_exact_boundary() {
@@ -84,15 +78,10 @@ fn ttl_no_short_circuit_without_data() {
     assert!(!r.should_short_circuit_cache(STORED_AT_MS));
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// STALE-WHILE-REVALIDATE
-// ══════════════════════════════════════════════════════════════════════════
-
 #[test]
 fn swr_fresh_within_ttl() {
     let mut r = swr_resource();
     seed_data(&mut r, "cached", STORED_AT_MS);
-    // stored_at=1000, TTL=1000. Fresh while age < TTL.
     assert!(r.is_cache_fresh(STORED_AT_MS + 500));
     assert!(r.is_cache_fresh(AT_TTL_BOUNDARY));
 }
@@ -101,7 +90,6 @@ fn swr_fresh_within_ttl() {
 fn swr_stale_but_serveable_in_stale_window() {
     let mut r = swr_resource();
     seed_data(&mut r, "cached", STORED_AT_MS);
-    // stored_at=1000, TTL=1000, stale=2000. Past TTL but within stale window.
     assert!(!r.is_cache_fresh(ONE_MS_PAST_TTL), "past TTL, not fresh");
     assert!(r.is_stale_but_serveable(ONE_MS_PAST_TTL));
     assert!(
@@ -114,7 +102,6 @@ fn swr_stale_but_serveable_in_stale_window() {
 fn swr_fully_expired_past_stale_window() {
     let mut r = swr_resource();
     seed_data(&mut r, "cached", STORED_AT_MS);
-    // stored_at=1000, total=3000. age at ONE_MS_PAST_SWR = 3001 > total => expired
     assert!(r.is_cache_expired(ONE_MS_PAST_SWR));
     assert!(!r.is_cache_fresh(ONE_MS_PAST_SWR));
     assert!(!r.is_stale_but_serveable(ONE_MS_PAST_SWR));
@@ -124,7 +111,6 @@ fn swr_fully_expired_past_stale_window() {
 fn swr_should_serve_stale_and_revalidate_in_stale_window() {
     let mut r = swr_resource();
     seed_data(&mut r, "cached", STORED_AT_MS);
-    // Between TTL boundary and stale boundary => should revalidate.
     assert!(r.should_serve_stale_and_revalidate(ONE_MS_PAST_TTL));
     assert!(r.should_serve_stale_and_revalidate(STORED_AT_MS + 2_000));
 }
@@ -133,7 +119,6 @@ fn swr_should_serve_stale_and_revalidate_in_stale_window() {
 fn swr_should_not_serve_stale_within_ttl() {
     let mut r = swr_resource();
     seed_data(&mut r, "cached", STORED_AT_MS);
-    // Still fresh => no need for stale-serve.
     assert!(!r.should_serve_stale_and_revalidate(STORED_AT_MS + 500));
 }
 
@@ -143,7 +128,6 @@ fn swr_begin_request_stale_cache_hit_triggers_background_refetch() {
     let mut seq = test_sequencer();
     seed_data(&mut r, "cached", STORED_AT_MS);
 
-    // One ms past TTL => stale but serveable, triggers background refetch.
     let result = r.begin_request(&mut seq, ONE_MS_PAST_TTL, QueryFetchMode::Normal);
     assert!(matches!(result, QueryBeginResult::StaleCacheHit { .. }));
     assert_eq!(
@@ -160,7 +144,6 @@ fn swr_begin_request_expired_starts_normal_fetch() {
     let mut seq = test_sequencer();
     seed_data(&mut r, "cached", STORED_AT_MS);
 
-    // stored_at=1000, total=3000. age at now=5000 is 4000 > total => expired
     let result = r.begin_request(&mut seq, STORED_AT_MS + 4_000, QueryFetchMode::Normal);
     assert!(matches!(result, QueryBeginResult::Started { .. }));
     assert_eq!(r.cache_hits(), 0, "no cache hit when expired");
@@ -170,16 +153,10 @@ fn swr_begin_request_expired_starts_normal_fetch() {
 fn swr_stale_boundary_exact() {
     let mut r = swr_resource();
     seed_data(&mut r, "cached", STORED_AT_MS);
-    // stored_at=1000, total=3000. age at AT_SWR_BOUNDARY = 3000 == total => serveable (inclusive)
     assert!(r.is_stale_but_serveable(AT_SWR_BOUNDARY));
-    // age at ONE_MS_PAST_SWR = 3001 > total => expired
     assert!(!r.is_stale_but_serveable(ONE_MS_PAST_SWR));
     assert!(r.is_cache_expired(ONE_MS_PAST_SWR));
 }
-
-// ══════════════════════════════════════════════════════════════════════════
-// NO-CACHE POLICY
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn nocache_never_fresh() {

@@ -1,23 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-/// Trigger configuration for automatic refetching.
-///
-/// Note: In v2, these triggers are defined but the event system integration
-/// (window focus, reconnect) is not yet implemented. This enum exists for
-/// forward compatibility and option parsing.
+/// Inert config: focus/reconnect refetching is not implemented yet, so this
+/// is stored but never acted on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefetchTrigger {
-    /// Always refetch when the trigger fires.
     #[default]
     Always,
-    /// Refetch only if the data is stale (past TTL).
     IfStale,
-    /// Never refetch on this trigger.
     Never,
 }
 
 impl RefetchTrigger {
-    /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
             Self::Always => "Always",

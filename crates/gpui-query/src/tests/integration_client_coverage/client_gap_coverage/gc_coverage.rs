@@ -1,31 +1,11 @@
-//! GC and observer coverage tests — Gaps 1, 2, 3, 3b, 4, 4b, 5, 6, 6b, 6c, 7, 8.
-//!
-//! Tests for garbage collection behavior across query, mutation, and infinite
-//! query buckets including observer retention, SWR window protection, loading
-//! state preservation, max-entries eviction, and observer configuration.
-
 use gpui::{AppContext as _, BorrowAppContext as _, TestAppContext};
 
-use crate::client::{QueryClient, QueryObserver};
+use crate::client::{QueryBucket, QueryClient};
 use crate::core::*;
 use crate::tests::test_support::*;
 
-// -- Gap 1: (removed) observer_count-based GC protection --------------------
-//
-// Audit #8 removed `observer_count` / `retain` / `release` from the buckets:
-// the count was never incremented from production hooks (GPUI `Drop` has no
-// `cx`), so it was always 0. GC now relies solely on `WeakEntity::upgrade()`
-// liveness plus age/status — there is no observer-based eviction protection
-// to test. Observed-but-aged resources are evicted by the normal age rules.
-
-// -- Gap 3: GC protection for StaleWhileRevalidate resources within stale window
-//
-// No test creates a SWR resource and verifies GC does NOT evict it during
-// the stale-but-serveable window.
-
 #[gpui::test]
 fn test_gc_preserves_swr_resources_within_stale_window(cx: &mut TestAppContext) {
-    // Use a small gc_time so success_threshold = 2*500 = 1000ms is small
     setup_query_client_with_gc(cx, 500);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
@@ -41,19 +21,13 @@ fn test_gc_preserves_swr_resources_within_stale_window(cx: &mut TestAppContext) 
                 cx,
             );
             entity.update(cx, |r, _| r.apply_success("data".to_string(), 1_000));
-            // GC reads live entity state (audit #CL2): Success + swr policy +
-            // last_updated_at=1000 are all set by `apply_success` above.
 
-            // GC at t=3000: age=2000, ttl expired (2000 > 1000), but within
-            // stale window (2000 <= 6000). SWR protection should prevent eviction.
             client.gc_with_time(3_000, cx);
             assert!(
                 client.query::<String, QueryError>(&key).is_some(),
                 "SWR resource within stale window must survive GC"
             );
 
-            // GC at t=8000: age=7000 > total_valid(6000), AND age > success_threshold(1000).
-            // SWR resource past total valid window should be evicted.
             client.gc_with_time(8_000, cx);
             assert!(
                 client.query::<String, QueryError>(&key).is_none(),
@@ -62,8 +36,6 @@ fn test_gc_preserves_swr_resources_within_stale_window(cx: &mut TestAppContext) 
         });
     });
 }
-
-// -- Gap 3b: SWR resource within TTL (fresh) is also preserved ---------------
 
 #[gpui::test]
 fn test_gc_preserves_swr_resources_within_ttl(cx: &mut TestAppContext) {
@@ -82,10 +54,7 @@ fn test_gc_preserves_swr_resources_within_ttl(cx: &mut TestAppContext) {
                 cx,
             );
             entity.update(cx, |r, _| r.apply_success("fresh".to_string(), 1_000));
-            // GC reads live entity state (audit #CL2): Success + swr policy +
-            // last_updated_at=1000 are all set by `apply_success` above.
 
-            // GC at t=3000: age=2000 < ttl(5000), still fresh
             client.gc_with_time(3_000, cx);
             assert!(
                 client.query::<String, QueryError>(&key).is_some(),
@@ -95,13 +64,8 @@ fn test_gc_preserves_swr_resources_within_ttl(cx: &mut TestAppContext) {
     });
 }
 
-// -- Gap 5: Success-mutation GC path: completed mutation ages past gc_time ---
-//
-// The Success mutation GC path is unverified. This test creates a mutation,
-// completes it with success, then verifies GC behavior at far-future time.
-
 #[gpui::test]
-fn test_gc_evicts_completed_mutation_after_gc_time(cx: &mut TestAppContext) {
+fn test_gc_preserves_success_mutation(cx: &mut TestAppContext) {
     setup_query_client_with_gc(cx, 1_000);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
@@ -110,21 +74,15 @@ fn test_gc_evicts_completed_mutation_after_gc_time(cx: &mut TestAppContext) {
             });
             client.register_mutation::<String, String, QueryError>(&entity, cx);
 
-            // Complete the mutation with success
             entity.update(cx, |m, _| {
                 m.begin("vars".to_string());
                 m.complete_success("done".to_string());
             });
             assert!(entity.read(cx).is_success());
 
-            // GC at far-future: the mutation's updated_at is set to now() on insert.
-            // Since the mutation is in Success state (not Idle/Failure), GC should
-            // NOT evict it — Success mutations are kept by the MutationBucket GC.
             client.gc_with_time(1_000_000, cx);
 
             let mutations = client.all_mutations::<String, String, QueryError>();
-            // Success mutations are NOT in the evictable set (Idle | Failure only),
-            // so they survive GC regardless of age.
             assert!(
                 !mutations.is_empty(),
                 "Success mutation should survive GC — only Idle/Failure are evictable"
@@ -132,11 +90,6 @@ fn test_gc_evicts_completed_mutation_after_gc_time(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- Gap 6: InfiniteQueryBucket GC evicts stale infinite query ----------------
-//
-// InfiniteQueryBucket GC reads entity state via cx (not cached snapshot).
-// This test verifies GC evicts idle infinite queries and preserves loading ones.
 
 #[gpui::test]
 fn test_gc_evicts_idle_infinite_query_with_realistic_timing(cx: &mut TestAppContext) {
@@ -146,8 +99,8 @@ fn test_gc_evicts_idle_infinite_query_with_realistic_timing(cx: &mut TestAppCont
             let key = QueryKey::from("inf_gc_idle");
             let _entity = client.infinite_resource::<String, QueryError>(key.clone(), cx);
 
-            // Entity is Idle with no data — GC should evict it
-            client.gc_with_time(100_000, cx);
+            let now = crate::client::current_time_ms();
+            client.gc_with_time(now + 100_000, cx);
 
             assert!(
                 client.infinite_query::<String, QueryError>(&key).is_none(),
@@ -157,8 +110,6 @@ fn test_gc_evicts_idle_infinite_query_with_realistic_timing(cx: &mut TestAppCont
     });
 }
 
-// -- Gap 6b: InfiniteQueryBucket GC preserves loading infinite query ----------
-
 #[gpui::test]
 fn test_gc_preserves_loading_infinite_query(cx: &mut TestAppContext) {
     setup_query_client_with_gc(cx, 1_000);
@@ -167,7 +118,6 @@ fn test_gc_preserves_loading_infinite_query(cx: &mut TestAppContext) {
             let key = QueryKey::from("inf_gc_loading");
             let entity = client.infinite_resource::<String, QueryError>(key.clone(), cx);
 
-            // Transition to loading by starting a request
             let _rid = client
                 .next_request_id_for_infinite_key::<String, QueryError>(&key)
                 .expect("request id");
@@ -177,8 +127,6 @@ fn test_gc_preserves_loading_infinite_query(cx: &mut TestAppContext) {
             });
             assert!(entity.read(cx).status().is_loading());
 
-            // GC reads the live LoadingEmpty status (audit #CL2) — no snapshot
-            // update is needed; loading resources survive regardless of age.
             client.gc_with_time(1_000_000, cx);
 
             assert!(
@@ -189,13 +137,6 @@ fn test_gc_preserves_loading_infinite_query(cx: &mut TestAppContext) {
     });
 }
 
-// -- Gap 6c / #133: InfiniteQueryBucket evicts aged successful resources -----
-//
-// Audit #1/#133: successful infinite resources must be evicted once their age
-// exceeds `SUCCESS_GC_MULTIPLIER * gc_time_ms` — previously they were never
-// evicted, causing unbounded memory growth. (`observer_count` protection was
-// removed in #8, so this is pure age-based eviction of a Success entry.)
-
 #[gpui::test]
 fn test_gc_evicts_aged_successful_infinite_query(cx: &mut TestAppContext) {
     setup_query_client_with_gc(cx, 1_000);
@@ -204,7 +145,6 @@ fn test_gc_evicts_aged_successful_infinite_query(cx: &mut TestAppContext) {
             let key = QueryKey::from("inf_gc_success");
             let entity = client.infinite_resource::<String, QueryError>(key.clone(), cx);
 
-            // Load one page successfully at t=1_000 (sets last_updated_at=1_000).
             entity.update(cx, |r, _| {
                 let mut seq = RequestSequencer::new();
                 let id = r.begin_fetch_next(&mut seq, 1_000).expect("begin fetch");
@@ -212,7 +152,6 @@ fn test_gc_evicts_aged_successful_infinite_query(cx: &mut TestAppContext) {
             });
             assert_eq!(entity.read(cx).status(), QueryStatus::Success);
 
-            // success_threshold = 2 * 1000 = 2000. GC at t=3500 -> age=2500 > 2000 -> evicted.
             client.gc_with_time(3_500, cx);
             assert!(
                 client.infinite_query::<String, QueryError>(&key).is_none(),
@@ -222,20 +161,11 @@ fn test_gc_evicts_aged_successful_infinite_query(cx: &mut TestAppContext) {
     });
 }
 
-// -- Gap 2: Bucket max_entries eviction ---------------------------------------
-//
-// QueryBucket::with_max_entries() and evict_oldest() eviction when max entries
-// exceeded. We test this by creating a client and inserting resources via
-// resource_with_policies, then verifying eviction. Since with_max_entries is
-// pub(crate) on the bucket, we test indirectly through the client by creating
-// many resources and verifying they all exist (the default limit is 10_000).
-
 #[gpui::test]
 fn test_bucket_default_max_entries_allows_many_resources(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Create 100 resources — well within the default 10_000 limit
             for i in 0..100 {
                 let key = format!("max_{}", i);
                 let _entity = client.resource::<String, QueryError>(key, cx);
@@ -251,12 +181,6 @@ fn test_bucket_default_max_entries_allows_many_resources(cx: &mut TestAppContext
     });
 }
 
-// -- Gap 4: MutationBucket touch/set_loading/set_not_loading -----------------
-//
-// These methods are marked #[allow(dead_code)] with zero tests. We test them
-// indirectly by verifying that a loading mutation survives GC (the loading
-// flag on the entry prevents mid-flight eviction).
-
 #[gpui::test]
 fn test_loading_mutation_survives_gc(cx: &mut TestAppContext) {
     setup_query_client_with_gc(cx, 1_000);
@@ -267,13 +191,11 @@ fn test_loading_mutation_survives_gc(cx: &mut TestAppContext) {
             });
             client.register_mutation::<String, String, QueryError>(&entity, cx);
 
-            // Begin mutation — transitions to Loading
             entity.update(cx, |m, _| {
                 m.begin("vars".to_string());
             });
             assert!(entity.read(cx).is_loading());
 
-            // GC at far-future — loading mutation should survive
             client.gc_with_time(1_000_000, cx);
 
             let mutations = client.all_mutations::<String, String, QueryError>();
@@ -286,13 +208,8 @@ fn test_loading_mutation_survives_gc(cx: &mut TestAppContext) {
     });
 }
 
-// -- Gap 4b: Idle mutation is evicted by GC when age exceeds gc_time ---------
-
 #[gpui::test]
 fn test_idle_mutation_is_evicted_by_gc_after_age_exceeds_threshold(cx: &mut TestAppContext) {
-    // MutationBucket GC uses real wall-clock time for updated_at (set on insert).
-    // gc_time is clamped to MIN_GC_TIME_MS (1000ms). We use gc_with_time with
-    // a far-future now_ms to guarantee the mutation's age exceeds gc_threshold.
     setup_query_client_with_gc(cx, 1);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
@@ -301,7 +218,6 @@ fn test_idle_mutation_is_evicted_by_gc_after_age_exceeds_threshold(cx: &mut Test
             });
             client.register_mutation::<String, String, QueryError>(&entity, cx);
 
-            // Pre-condition: mutation is idle (evictable status set).
             assert!(
                 entity.read(cx).is_idle(),
                 "mutation should be idle before any operation"
@@ -312,10 +228,7 @@ fn test_idle_mutation_is_evicted_by_gc_after_age_exceeds_threshold(cx: &mut Test
                 "mutation should exist before GC"
             );
 
-            // Use a far-future timestamp so age = now_ms - updated_at >> gc_threshold.
-            // updated_at is ~current_time_ms() at insert, so 100 years from now
-            // guarantees the age exceeds the clamped gc_threshold (1000ms).
-            let far_future = crate::client::current_time_ms() + 3_600_000; // +1 hour
+            let far_future = crate::client::current_time_ms() + 3_600_000;
             client.gc_with_time(far_future, cx);
 
             assert_eq!(
@@ -327,44 +240,6 @@ fn test_idle_mutation_is_evicted_by_gc_after_age_exceeds_threshold(cx: &mut Test
     });
 }
 
-// -- Gap 7: QueryObserver::observe() returns Some for live entity ------------
-//
-// The v2 fix returns Option<Subscription>. Verify that observe returns Some
-// for a live entity and that constructing an observer from a WeakEntity that
-// has been dropped would return None. Since GPUI doesn't allow truly dropping
-// entities within a single cx.update scope, we verify the successful path
-// and document the None path as the v2 safety improvement.
-
-#[gpui::test]
-fn test_query_observer_observe_returns_some_for_live_entity(cx: &mut TestAppContext) {
-    setup_query_client(cx);
-    cx.update(|cx| {
-        cx.update_global::<QueryClient, _>(|client, cx| {
-            let entity = client.resource::<String, QueryError>("obs_live", cx);
-
-            // Create an observer and verify it can observe a live entity
-            let mut observer = QueryObserver::new(&entity);
-
-            // Audit fix #52: adopt the shared `observe_with_dummy_view` helper
-            // instead of defining a local `struct DummyView;` + manual view dance.
-            let sub = observe_with_dummy_view::<String, QueryError>(cx, &mut observer);
-            assert!(
-                sub.is_some(),
-                "observe should return Some(Subscription) for a live entity"
-            );
-
-            // The observer stores a WeakEntity internally. If the entity were
-            // dropped (which can't happen in this scope), observe() would
-            // return None — this is the v2 safety improvement.
-        });
-    });
-}
-
-// -- Gap 8: Observer status deduplication ------------------------------------
-//
-// Verifies that ObserverConfig { notify_on_status_change_only: true } is the
-// default and that the observer is properly created with this config.
-
 #[gpui::test]
 fn test_observer_status_dedup_default_config_is_status_change_only(_cx: &mut TestAppContext) {
     let config = crate::client::ObserverConfig::default();
@@ -373,7 +248,6 @@ fn test_observer_status_dedup_default_config_is_status_change_only(_cx: &mut Tes
         "default ObserverConfig should notify on status change only"
     );
 
-    // Create a config that always notifies
     let always_notify = crate::client::ObserverConfig {
         notify_on_status_change_only: false,
     };
@@ -383,39 +257,16 @@ fn test_observer_status_dedup_default_config_is_status_change_only(_cx: &mut Tes
     );
 }
 
-// -- #134: MutationBucket evict_oldest triggers past DEFAULT_MAX_ENTRIES ------
-//
-// Audit #134: verify that the MutationBucket `max_entries` cap actually binds
-// growth. `evict_oldest` (audit #2) is called from `insert` when the bucket is
-// at capacity, evicting the oldest non-loading entry. We insert more than
-// `DEFAULT_MAX_ENTRIES` (10_000) Idle mutations and assert the live entry count
-// stays bounded at exactly the cap — proving eviction fired on every subsequent
-// insert rather than growing without limit.
-//
-// `DEFAULT_MAX_ENTRIES` lives in the private `client::bucket::types` module and
-// isn't nameable from here; we mirror its documented value (10_000) as the
-// expected bound. If the constant changes, this test's expected value must be
-// updated to match.
-
 #[gpui::test]
 fn test_mutation_bucket_evict_oldest_keeps_count_bounded(cx: &mut TestAppContext) {
-    // Mirrors `crate::client::bucket::types::DEFAULT_MAX_ENTRIES` (pub(crate),
-    // not nameable from the tests module).
     const MAX_ENTRIES: usize = 10_000;
 
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Hold strong refs to every created entity for the duration of the
-            // test. The bucket stores only WeakEntity handles; `evict_oldest`
-            // and `all_entities` skip dead weak refs, so the entities must stay
-            // alive for the count assertions below to be meaningful.
             let mut live: Vec<gpui::Entity<MutationResource<String, String, QueryError>>> =
                 Vec::with_capacity(MAX_ENTRIES + 2);
 
-            // Insert MAX_ENTRIES + 2 Idle mutations — crossing the cap by 2
-            // is enough to trigger evict_oldest and prove the count stays
-            // bounded (audit T14: avoid constructing 10 005 entities).
             for _ in 0..(MAX_ENTRIES + 2) {
                 let entity = cx.new(|_| {
                     MutationResource::<String, String, QueryError>::new(RetryPolicy::no_retries())
@@ -429,20 +280,243 @@ fn test_mutation_bucket_evict_oldest_keeps_count_bounded(cx: &mut TestAppContext
                 mutations.len(),
                 MAX_ENTRIES,
                 "MutationBucket entry count must stay bounded at DEFAULT_MAX_ENTRIES \
-                 ({}); evict_oldest should have triggered on every insert past the \
-                 cap (#134)",
+                 ({}); evict_oldest should have triggered on every insert past the cap",
                 MAX_ENTRIES
             );
 
-            // Diagnostics should agree with the bounded bucket size.
             let diag = client.diagnostics(cx);
             assert_eq!(
                 diag.mutation_count, MAX_ENTRIES,
                 "diagnostics.mutation_count must match the bounded bucket size"
             );
 
-            // Hold `live` to the end so the strong refs outlive the assertions.
             drop(live);
+        });
+    });
+}
+
+fn create_evict_entry(
+    bucket: &mut QueryBucket<String, QueryError>,
+    key: &str,
+    cx: &mut gpui::App,
+) -> gpui::Entity<QueryResource<String, QueryError>> {
+    bucket.get_or_create(
+        QueryKey::from(key),
+        CachePolicy::Ttl { ttl_ms: 60_000 },
+        RequestPolicy::LatestWins,
+        cx,
+    )
+}
+
+fn stamp_and_refresh(
+    bucket: &mut QueryBucket<String, QueryError>,
+    entity: &gpui::Entity<QueryResource<String, QueryError>>,
+    key: &str,
+    updated_at_ms: u64,
+    cx: &mut gpui::App,
+) {
+    entity.update(cx, |r, _| r.apply_success(key.to_string(), updated_at_ms));
+    bucket.get_or_create(
+        QueryKey::from(key),
+        CachePolicy::Ttl { ttl_ms: 60_000 },
+        RequestPolicy::LatestWins,
+        cx,
+    );
+}
+
+#[gpui::test]
+fn test_evict_oldest_removes_oldest_live_entry_at_capacity(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let mut bucket = QueryBucket::<String, QueryError>::new();
+        bucket.inner.max_entries = 3;
+
+        let a = create_evict_entry(&mut bucket, "evict_a", cx);
+        stamp_and_refresh(&mut bucket, &a, "evict_a", 1_000, cx);
+        let b = create_evict_entry(&mut bucket, "evict_b", cx);
+        stamp_and_refresh(&mut bucket, &b, "evict_b", 2_000, cx);
+        let c = create_evict_entry(&mut bucket, "evict_c", cx);
+        stamp_and_refresh(&mut bucket, &c, "evict_c", 3_000, cx);
+
+        let _d = create_evict_entry(&mut bucket, "evict_d", cx);
+
+        assert!(
+            !bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_a")),
+            "oldest live entry should be evicted at capacity"
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_b"))
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_c"))
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_d"))
+        );
+    });
+}
+
+#[gpui::test]
+fn test_evict_oldest_prefers_dead_entry_over_live_at_capacity(cx: &mut TestAppContext) {
+    let mut bucket = QueryBucket::<String, QueryError>::new();
+    bucket.inner.max_entries = 2;
+
+    let live = cx.update(|cx| {
+        let dead = create_evict_entry(&mut bucket, "evict_dead", cx);
+        stamp_and_refresh(&mut bucket, &dead, "evict_dead", 1_000, cx);
+        drop(dead);
+
+        let live = create_evict_entry(&mut bucket, "evict_live", cx);
+        stamp_and_refresh(&mut bucket, &live, "evict_live", 2_000, cx);
+        live
+    });
+
+    cx.update(|cx| {
+        create_evict_entry(&mut bucket, "evict_new", cx);
+
+        assert!(
+            !bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_dead")),
+            "collected entry should be evicted before any live entry"
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_live")),
+            "older live entry should be kept while a collected entry can go"
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_new"))
+        );
+    });
+    drop(live);
+}
+
+#[gpui::test]
+fn test_evict_oldest_with_only_dead_entries_keeps_bucket_bounded(cx: &mut TestAppContext) {
+    let mut bucket = QueryBucket::<String, QueryError>::new();
+    bucket.inner.max_entries = 3;
+
+    cx.update(|cx| {
+        for i in 0..3 {
+            create_evict_entry(&mut bucket, &format!("evict_dead_{i}"), cx);
+        }
+        assert_eq!(bucket.inner.entries.len(), 3);
+    });
+
+    cx.update(|cx| {
+        create_evict_entry(&mut bucket, "evict_live_key", cx);
+
+        assert_eq!(
+            bucket.inner.entries.len(),
+            3,
+            "a bucket of collected entries must still evict on insert instead of \
+             growing past max_entries"
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_live_key"))
+        );
+    });
+}
+
+#[gpui::test]
+fn test_evict_oldest_prefers_dead_entry_with_newest_mirror_at_capacity(cx: &mut TestAppContext) {
+    let mut bucket = QueryBucket::<String, QueryError>::new();
+    bucket.inner.max_entries = 2;
+
+    let live = cx.update(|cx| {
+        let live = create_evict_entry(&mut bucket, "evict_live_older", cx);
+        stamp_and_refresh(&mut bucket, &live, "evict_live_older", 1_000, cx);
+        live
+    });
+
+    cx.update(|cx| {
+        let dead = create_evict_entry(&mut bucket, "evict_dead_newest", cx);
+        stamp_and_refresh(&mut bucket, &dead, "evict_dead_newest", 2_000, cx);
+        drop(dead);
+    });
+
+    cx.update(|cx| {
+        create_evict_entry(&mut bucket, "evict_after_dead", cx);
+
+        assert!(
+            !bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_dead_newest")),
+            "collected entry must be evicted first even when its mirror age is \
+             the newest in the bucket"
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_live_older")),
+            "older live entry must survive while a collected entry can go"
+        );
+        assert!(
+            bucket
+                .inner
+                .entries
+                .contains_key(&QueryKey::from("evict_after_dead"))
+        );
+    });
+    drop(live);
+}
+
+#[gpui::test]
+fn test_gc_drops_dead_mutation_with_stale_loading_mirror(cx: &mut TestAppContext) {
+    setup_query_client_with_gc(cx, 1_000);
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            let entity = cx.new(|_| {
+                MutationResource::<String, String, QueryError>::new(RetryPolicy::no_retries())
+            });
+            client.register_mutation::<String, String, QueryError>(&entity, cx);
+
+            entity.update(cx, |m, _| m.begin("vars".to_string()));
+            let now = crate::client::current_time_ms();
+            client.gc_with_time(now + 1_000_000, cx);
+
+            assert_eq!(
+                client.diagnostics(cx).mutation_count,
+                1,
+                "loading mutation must survive GC while its entity is alive"
+            );
+            drop(entity);
+        });
+    });
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            let now = crate::client::current_time_ms();
+            client.gc_with_time(now + 1_000_000, cx);
+
+            assert_eq!(
+                client.diagnostics(cx).mutation_count,
+                0,
+                "a dead mutation with a stale loading mirror must be dropped by GC"
+            );
         });
     });
 }

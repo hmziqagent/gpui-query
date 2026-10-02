@@ -3,21 +3,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
 
-/// A structured, hierarchical cache key for query resources.
-///
-/// Inspired by TanStack Query's array keys (`["todos", id]`), a `QueryKey`
-/// is an ordered sequence of string segments.
-///
-/// # Cheap cloning
-///
-/// Internally uses `Arc<[Arc<str>]>`, so cloning is a single atomic ref-count
-/// increment regardless of key length.
-///
-/// # Invariants
-///
-/// A `QueryKey` must contain at least one segment. Zero-length keys are
-/// unsupported: constructing one via [`QueryKey::new`] with an empty iterator
-/// will panic unconditionally in all build modes.
+/// Hierarchical key (`["todos", id]` style). Must contain at least one
+/// segment: [`QueryKey::new`](Self::new) panics on empty, serde returns an
+/// error instead. Cloning is one refcount bump (`Arc<[Arc<str>]>`).
 ///
 /// # Examples
 ///
@@ -32,11 +20,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq}
 pub struct QueryKey(Arc<[Arc<str>]>);
 
 impl QueryKey {
-    /// Create a key from an iterator of string-like parts.
-    ///
     /// # Panics
     ///
-    /// Panics if the iterator yields zero segments.
+    /// If the iterator yields zero segments.
     pub fn new(parts: impl IntoIterator<Item: AsRef<str>>) -> Self {
         let segments: Vec<Arc<str>> = parts.into_iter().map(|s| Arc::from(s.as_ref())).collect();
         assert!(
@@ -46,19 +32,16 @@ impl QueryKey {
         Self(segments.into())
     }
 
-    /// Create a single-segment key from a string.
     #[must_use]
     pub fn from_single(value: impl AsRef<str>) -> Self {
         Self(Arc::from([Arc::from(value.as_ref())]))
     }
 
-    /// The key segments.
     #[must_use]
     pub fn parts(&self) -> &[Arc<str>] {
         &self.0
     }
 
-    /// Returns the single segment if this key has exactly one part, else `None`.
     #[must_use]
     pub fn as_single(&self) -> Option<&str> {
         if self.0.len() == 1 {
@@ -68,12 +51,6 @@ impl QueryKey {
         }
     }
 
-    /// Returns the first segment as a string slice.
-    ///
-    /// This yields only the **first** segment of the key, not the full key.
-    /// For a joined representation of the entire key, use [`QueryKey::to_path`];
-    /// for the single segment when the key has exactly one part, use
-    /// [`QueryKey::as_single`].
     #[must_use]
     pub fn first_segment(&self) -> &str {
         match self.0.first() {
@@ -82,38 +59,73 @@ impl QueryKey {
         }
     }
 
-    /// Returns the full key as a double-colon-separated path string.
-    ///
-    /// Useful for diagnostics and DevTools display. Uses `"::"` as the
-    /// separator to avoid ambiguity when segments contain forward slashes.
+    /// Joins with `"::"`, escaping `\` and `:` inside segments so distinct
+    /// keys never map to one path; `from_path` inverts it.
     pub fn to_path(&self) -> String {
-        let mut iter = self.0.iter().map(|s| s.as_ref());
-        match iter.next() {
-            Some(first) => iter.fold(first.to_owned(), |acc, s| acc + "::" + s),
-            None => String::new(),
+        const SEP: &str = "::";
+        let escapes: usize = self
+            .0
+            .iter()
+            .map(|s| s.chars().filter(|c| matches!(c, '\\' | ':')).count())
+            .sum();
+        let len = self.0.iter().map(|s| s.len()).sum::<usize>()
+            + escapes
+            + SEP.len() * self.0.len().saturating_sub(1);
+        let mut path = String::with_capacity(len);
+        for (i, segment) in self.0.iter().enumerate() {
+            if i > 0 {
+                path.push_str(SEP);
+            }
+            for ch in segment.chars() {
+                if matches!(ch, '\\' | ':') {
+                    path.push('\\');
+                }
+                path.push(ch);
+            }
         }
+        path
     }
 
-    /// Returns `true` if this key starts with the given `prefix`.
-    ///
-    /// If `prefix` is empty (zero segments), returns `true` — an empty
-    /// prefix matches every valid key. If `self` is also empty, returns
-    /// `false`, since zero-length keys are unsupported.
+    /// Inverse of [`to_path`](Self::to_path); any input yields at least one
+    /// segment and never panics.
+    #[cfg(any(feature = "persist", test))]
+    pub(crate) fn from_path(path: &str) -> Self {
+        let mut segments: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut escaped = false;
+        let mut chars = path.chars();
+        while let Some(ch) = chars.next() {
+            if escaped {
+                current.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == ':' {
+                segments.push(std::mem::take(&mut current));
+                match chars.next() {
+                    Some(':') => {}
+                    Some('\\') => escaped = true,
+                    Some(other) => current.push(other),
+                    None => {}
+                }
+            } else {
+                current.push(ch);
+            }
+        }
+        segments.push(current);
+        Self::new(segments)
+    }
+
+    /// An empty `prefix` matches every valid key; an empty `self` never matches.
     pub fn starts_with(&self, prefix: &QueryKey) -> bool {
         if prefix.0.is_empty() {
-            // An empty prefix matches every valid (non-empty) key.
             return !self.0.is_empty();
         }
         self.0.starts_with(&prefix.0)
     }
 
-    /// Create a new key by appending an extra segment.
-    ///
-    /// This is **O(n)** in key length because it copies all existing segments
-    /// into a new `Arc<[Arc<str>]>`. For hot paths that build keys incrementally,
-    /// prefer constructing the full key in one [`QueryKey::new`] call rather than
-    /// chaining `.join()` calls (e.g., prefer `QueryKey::new(["a", "b", "c"])`
-    /// over `QueryKey::from("a").join("b").join("c")`).
+    /// O(n) copy of all segments; prefer building the full key in one
+    /// [`new`](Self::new) call over chaining `join`s.
     pub fn join(&self, extra: &str) -> QueryKey {
         let mut parts: Vec<Arc<str>> = self.0.to_vec();
         parts.push(Arc::from(extra));
@@ -128,8 +140,6 @@ impl Deref for QueryKey {
         &self.0
     }
 }
-
-// ── From impls ──────────────────────────────────────────────────────────
 
 impl From<&str> for QueryKey {
     fn from(value: &str) -> Self {
@@ -161,8 +171,6 @@ impl From<Vec<String>> for QueryKey {
     }
 }
 
-// ── Serde ───────────────────────────────────────────────────────────────
-
 impl Serialize for QueryKey {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
@@ -183,7 +191,11 @@ impl<'de> Deserialize<'de> for QueryKey {
         }
 
         match KeyRepr::deserialize(deserializer)? {
-            KeyRepr::Array(parts) => Ok(Self::new(parts)),
+            // Deserializing untrusted input cannot panic, so empty must Err here.
+            KeyRepr::Array(parts) if !parts.is_empty() => Ok(Self::new(parts)),
+            KeyRepr::Array(_) => Err(serde::de::Error::custom(
+                "QueryKey must contain at least one segment",
+            )),
             KeyRepr::String(s) => Ok(Self::from_single(s)),
         }
     }
@@ -239,6 +251,29 @@ mod tests {
     }
 
     #[test]
+    fn serde_empty_array_returns_err_not_panic() {
+        let err = serde_json::from_str::<QueryKey>("[]").unwrap_err();
+        assert!(err.to_string().contains("at least one segment"));
+    }
+
+    #[test]
+    fn serde_resource_empty_key_field_returns_err_not_panic() {
+        use crate::core::{CachePolicy, QueryResource, RequestPolicy};
+
+        let resource = QueryResource::<String>::new(
+            QueryKey::from(["users"]),
+            CachePolicy::NoCache,
+            RequestPolicy::LatestWins,
+        );
+        let mut value = serde_json::to_value(&resource).unwrap();
+        value["key"] = serde_json::Value::Array(Vec::new());
+        let json = value.to_string();
+
+        let err = serde_json::from_str::<QueryResource<String>>(&json).unwrap_err();
+        assert!(err.to_string().contains("at least one segment"));
+    }
+
+    #[test]
     #[should_panic(expected = "QueryKey must contain at least one segment")]
     fn new_rejects_empty_parts() {
         let _ = QueryKey::new(std::iter::empty::<&str>());
@@ -247,14 +282,12 @@ mod tests {
     #[test]
     fn starts_with_empty_prefix_matches_valid_key() {
         let key = QueryKey::from(["users", "42"]);
-        // Bypass QueryKey::new to create an empty key for testing starts_with.
         let empty = QueryKey(Arc::from([] as [Arc<str>; 0]));
         assert!(key.starts_with(&empty));
     }
 
     #[test]
     fn starts_with_empty_prefix_does_not_match_empty_key() {
-        // Bypass QueryKey::new to create an empty key for testing starts_with.
         let empty = QueryKey(Arc::from([] as [Arc<str>; 0]));
         assert!(!empty.starts_with(&empty));
     }
@@ -272,5 +305,45 @@ mod tests {
     fn to_path_disambiguates_empty_string_segments() {
         let key = QueryKey::from(["", ""]);
         assert_eq!(key.to_path(), "::");
+    }
+
+    #[test]
+    fn to_path_escapes_colon_and_backslash_in_segments() {
+        let key = QueryKey::from(["a\\b", "c:d"]);
+        assert_eq!(key.to_path(), "a\\\\b::c\\:d");
+    }
+
+    #[test]
+    fn to_path_collision_pair_maps_to_distinct_paths() {
+        let first = QueryKey::from(["a::", ""]);
+        let second = QueryKey::from(["a", "::"]);
+        assert_ne!(first.to_path(), second.to_path());
+        assert_eq!(first.to_path(), "a\\:\\:::");
+        assert_eq!(second.to_path(), "a::\\:\\:");
+    }
+
+    #[test]
+    fn from_path_inverts_to_path_for_escaped_segments() {
+        for parts in [
+            vec!["a::", ""],
+            vec!["a", "::"],
+            vec!["a\\b", "c:d"],
+            vec!["::"],
+            vec![""],
+            vec!["\\"],
+        ] {
+            let key = QueryKey::from(parts);
+            assert_eq!(QueryKey::from_path(&key.to_path()), key);
+        }
+    }
+
+    #[test]
+    fn from_path_hostile_input_yields_at_least_one_segment() {
+        for path in ["", "::", "\\", "a\\", "a:b", "a:::b", "a:::", ":\\:"] {
+            assert!(
+                !QueryKey::from_path(path).parts().is_empty(),
+                "from_path({path:?}) must yield at least one segment"
+            );
+        }
     }
 }

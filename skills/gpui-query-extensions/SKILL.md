@@ -7,9 +7,9 @@ description: Use when adding HTTP cache-header handling (RFC 9111 Cache-Control 
 
 The main crate ships an in-memory, type-partitioned cache with GC, invalidation, and TTL/SWR policies. Two **satellite crates** + one **main-crate feature** add cross-restart durability and server-driven HTTP cache semantics. Everything here is strictly additive over `client`.
 
-- `gpui-query-http` (v0.1.0) — RFC 9111 `Cache-Control` → `CachePolicy` ("server wins"), plus a URL-keyed in-memory `HttpCache<B>` for cheap `304` revalidations. **GPUI-free** (depends on `core` only).
-- `gpui-query-persist` (v0.1.0) — reference atomic-durable `FilePersister`.
-- main crate `persist` feature — the async `Persister` trait, `persist_with` debounced driver, `hydrate`, and the typed serializer/deserializer registries.
+- `gpui-query-http` (v0.1.0): RFC 9111 `Cache-Control` → `CachePolicy` ("server wins"), plus a URL-keyed in-memory `HttpCache<B>` for cheap `304` revalidations. **GPUI-free** (depends on `core` only).
+- `gpui-query-persist` (v0.1.0): reference atomic-durable `FilePersister`.
+- main crate `persist` feature: the async `Persister` trait, `persist_with` debounced driver, `hydrate`, and the typed serializer/deserializer registries.
 
 Reach for these when:
 - the app should **survive a restart** with its cached data primed (cold start shows last-known-good instead of a loading spinner);
@@ -22,7 +22,7 @@ Do NOT reach for them for ephemeral in-memory state, or if you only need client-
 ```toml
 [dependencies]
 gpui      = "0.2.2"
-gpui-query = { version = "0.2.0", features = ["persist"] }   # enables persist layer
+gpui-query = { version = "0.2.2", features = ["persist"] }   # enables persist layer
 
 # HTTP cache (optional reqwest backend):
 gpui-query-http = { version = "0.1", features = ["reqwest"] } # drop "reqwest" to use your own HttpBackend
@@ -31,7 +31,7 @@ gpui-query-http = { version = "0.1", features = ["reqwest"] } # drop "reqwest" t
 gpui-query-persist = "0.1"
 ```
 
-The `persist` feature is `client + hook + dep:serde_json + dep:thiserror`. `gpui-query-persist` hard-depends on `persist + client + hook`. `gpui-query-http`'s `reqwest` feature pulls `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }`. With `default-features = false`, reqwest drops its own defaults (`default-tls` = native-tls, plus `charset`, `http2`, `macos-system-configuration`) and only rustls TLS is added back. Cookies and gzip/brotli/deflate compression are opt-in reqwest features that were **never** on by default — enable them on your own `reqwest::Client` if you need them.
+The `persist` feature is `client + hook + dep:serde_json + dep:thiserror`. `gpui-query-persist` hard-depends on `persist + client + hook`. `gpui-query-http`'s `reqwest` feature pulls `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }`. With `default-features = false`, reqwest drops its own defaults (`default-tls` = native-tls, plus `charset`, `http2`, `macos-system-configuration`) and only rustls TLS is added back. Cookies and gzip/brotli/deflate compression are opt-in reqwest features that were **never** on by default; enable them on your own `reqwest::Client` if you need them.
 
 macOS note: building `client`/`hook`/`persist` needs the Metal Toolchain once (`xcodebuild -downloadComponent MetalToolchain`). `gpui-query-http` (core-only) needs nothing extra.
 
@@ -45,9 +45,9 @@ register (de)serializers  ──►  hydrate() at cold start  ──►  persist
                                  re-prime concrete T)              CacheMutation bump)
 ```
 
-1. **Register** a serializer and deserializer per resource data type `T`. Only resources with a registered serializer are emitted into the snapshot; unregistered types fall back to metadata-only (skipped).
+1. **Register** a serializer and deserializer per resource data type `T`. Only resources with a registered serializer are emitted into the snapshot; unregistered types are skipped.
 2. **`hydrate()`** at startup: load the snapshot, offer each on-disk entry to every registered deserializer, prime matches via `set_query_data::<T, E>`.
-3. **`persist_with()`**: install a drop-guard driver. Every `CacheMutation` bump (a query/mutation resolving, `set_query_data`, `invalidate`, GC eviction) collects a fresh snapshot on the main thread, stashes it in a single pending slot, and spawns a debounced `save` on GPUI's `background_executor`. Bursts coalesce — only the latest snapshot survives the window.
+3. **`persist_with()`**: install a drop-guard driver. The first `CacheMutation` bump in a window (a query/mutation resolving, `set_query_data`, invalidation, GC eviction) arms a task that waits out the debounce, then collects a fresh snapshot on the main thread and saves it on GPUI's `background_executor`. Bumps arriving while a task is armed are free; every save reflects the latest state.
 
 The snapshot value is an opaque `serde_json::Value`; the typed round-trip is driven by the registries, so core never needs a `T: Serialize` bound.
 
@@ -67,7 +67,7 @@ pub enum PersistError {
     #[error("persistence serialize error: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("persistence deserialize error: {0}")]
-    Deserialize(String),                 // reserved for backends that surface parse errors
+    Deserialize(String),                 // for persisters that decline to tolerate a parse failure
     #[error("persistence version mismatch: expected {expected}, found {found}")]
     VersionMismatch { expected: u32, found: u32 },
     #[error("persistence bad path: {0}")]
@@ -102,7 +102,7 @@ pub trait Persister: Send + Sync + 'static {
 }
 ```
 
-`PersistHandle` is the drop-guard returned by `persist_with`. Holding it keeps the `CacheMutation` observation (and thus the debounced save loop) alive; **dropping it drops the `Subscription`**, so no new saves are scheduled. A save already parked on its debounce timer is detached and may still complete one final save. `PersistHandle::empty()` constructs a no-op handle (tests).
+`PersistHandle` is the drop-guard returned by `persist_with`. Holding it keeps the `CacheMutation` observation (and thus the debounced save loop) alive; **dropping it drops the `Subscription`**, so no new saves are scheduled. A task already parked on its debounce timer still completes its final collect and save. `PersistHandle::empty()` constructs a no-op handle (tests).
 
 ---
 
@@ -123,7 +123,7 @@ impl QueryClient {
 |---|---|---|
 | `filter` | `PersistFilter` | `PersistFilter::All` |
 | `max_age` | `std::time::Duration` | `Duration::from_secs(24 * 60 * 60)` (24h); entries older than this at save time are skipped |
-| `debounce` | `std::time::Duration` | `Duration::from_millis(500)`; `Duration::ZERO` disables the timer window (saves still serialize through the drain slot) |
+| `debounce` | `std::time::Duration` | `Duration::from_millis(500)`; `Duration::ZERO` disables the timer window (saves still run at most one per debounce window) |
 
 ```rust
 #[derive(Clone, Debug)]
@@ -135,7 +135,7 @@ pub enum PersistFilter {       // owned counterpart to core's borrowing QueryKey
 impl PersistFilter { pub fn matches(&self, key: &QueryKey) -> bool; }
 ```
 
-The observer callback collects a snapshot on the main thread (cheap; has `&App`), stashes it in a shared `Mutex<Option<PersistSnapshot>>` slot (replacing any pending one), then spawns a debounced task on the `background_executor` that, after `opts.debounce`, drains the slot and runs `persister.save`. An `armed` flag bounds in-flight tasks to one per window — a bump arriving while a task is already armed skips spawning (its snapshot still lands in the slot, drained by the armed task). Latest snapshot wins.
+The observer callback arms at most one task per debounce window (`armed` flag). The armed task waits out `opts.debounce` on the `background_executor` timer, then collects a fresh snapshot inside a main-thread `update_global` (entity reads need `&App`) and hands it to `persister.save` on the background executor. Because collection happens at drain time, a burst of bumps coalesces into one save of the latest state.
 
 ---
 
@@ -151,9 +151,9 @@ pub async fn hydrate<P: Persister>(
 ) -> Result<PersistSnapshot, PersistError>;
 ```
 
-Loads the snapshot, double-checks `version == PERSIST_VERSION` (returns `VersionMismatch` otherwise), then for **every** registered deserializer walks **every** entry and lets the step decode + prime it. Returns the post-filter snapshot so you can do additional metadata-only priming or diagnostics.
+Loads the snapshot, double-checks `version == PERSIST_VERSION` (returns `VersionMismatch` otherwise), then for **every** registered deserializer walks **every** entry and lets the step decode + prime it. Returns the loaded snapshot so you can inspect entries or prime types with no registered deserializer.
 
-> Name collision: there is also a legacy `QueryClient::hydrate(&mut self, _state, _cx)` **method** (metadata-only, no-op stub — see Legacy tier below). The value-carrying primitive is the **free function** `hydrate(...)`.
+> Name collision: there is also a legacy `QueryClient::hydrate(&mut self, _state, _cx)` **method** (metadata-only, no-op stub; see Legacy tier below). The value-carrying primitive is the **free function** `hydrate(...)`.
 
 ```rust
 impl QueryClient {
@@ -169,9 +169,9 @@ impl QueryClient {
 }
 ```
 
-- `f`/`deserialize` are **plain `fn` pointers** (not closures) — `Send + Sync + 'static` with no boxing at the call site. The registry boxes each pointer internally (`Box<dyn Fn>` / `Arc<dyn Fn>`) for type-erased storage — one allocation per registered type, not per save.
+- `f`/`deserialize` are **plain `fn` pointers** (not closures): `Send + Sync + 'static` with no boxing at the call site. The registry boxes each pointer internally (`Box<dyn Fn>` / `Arc<dyn Fn>`) for type-erased storage, one allocation per registered type, not per save.
 - `SerializerRegistry` keys on `TypeId::of::<T>()` alone (not `(T, E)`), because the bucket impls look up by `T`. Serialization depends only on the data type. **Registering two serializers for the same `T` under different `E` silently overwrites** (last wins); whichever survives applies to both `(T, E)` buckets, which is correct because the value *is* that `T`.
-- `DeserializerRegistry` is a `Vec<(TypeId, step)>`. **`hydrate` offers each entry to every deserializer** — O(deserializers × entries). There is no type discriminator on `PersistedEntry`, so routing is by trial.
+- `DeserializerRegistry` is a `Vec<(TypeId, step)>`. **`hydrate` offers each entry to every deserializer**, O(deserializers × entries). There is no type discriminator on `PersistedEntry`, so routing is by trial.
 - **Strict-deserializer contract:** a deserializer MUST return `None` for any JSON shape it does not recognize as its own `T`. A lax decoder that accepts a foreign shape wastes work and can mis-prime. Keep them strict and cheap (`v.as_str().map(...)` for a string, `serde_json::from_value(v).ok()` for a struct).
 
 ---
@@ -201,12 +201,12 @@ impl Persister for FilePersister { async fn load(&self) -> Result<PersistSnapsho
 |---|---|
 | Missing file | empty snapshot (no error) |
 | Corrupt / unparseable | logged via `eprintln!` + **empty snapshot** (no panic) |
-| `version != PERSIST_VERSION` | `Err(PersistError::VersionMismatch { expected, found })` — typed, so you can distinguish corrupt from wrong-format |
+| `version != PERSIST_VERSION` | `Err(PersistError::VersionMismatch { expected, found })`, typed so you can distinguish corrupt from wrong-format |
 | Valid | decoded snapshot |
 
-**Error mapping:** Windows `ERROR_ACCESS_DENIED` during the atomic replace (antivirus / concurrent reader) maps to `PersistError::Permission` (retryable — back off and retry). Every other IO failure is `PersistError::Io` with the original `std::io::Error` (kind + source chain intact).
+**Error mapping:** Windows `ERROR_ACCESS_DENIED` during the atomic replace (antivirus / concurrent reader) maps to `PersistError::Permission` (retryable: back off and retry). Every other IO failure is `PersistError::Io` with the original `std::io::Error` (kind + source chain intact).
 
-`save`/`load` do **synchronous `std::fs` I/O** in their async bodies — intended for GPUI's `background_executor` (a blocking-friendly pool). On a tokio multi-thread runtime, wrap in `spawn_blocking`. **Bincode format** JSON-encodes each entry's `value` to a `String` inside a bincode-safe adapter (bincode can't drive `serde_json::Value`'s `deserialize_any`); the conversion is lossless.
+`save`/`load` do **synchronous `std::fs` I/O** in their async bodies, intended for GPUI's `background_executor` (a blocking-friendly pool). On a tokio multi-thread runtime, wrap in `spawn_blocking`. **Bincode format** JSON-encodes each entry's `value` to a `String` inside a bincode-safe adapter (bincode can't drive `serde_json::Value`'s `deserialize_any`); the conversion is lossless.
 
 `pub use gpui_query::client::NoopPersister;` is re-exported from this crate as a one-stop default/test persister.
 
@@ -232,7 +232,7 @@ struct Users(Vec<User>);
 
 // Global so the bootstrap task can install the client before any view reads it.
 struct ClientGlobal(QueryClient);
-impl Global for ClientGlobal;
+impl Global for ClientGlobal {}
 
 fn bootstrap(cx: &mut App) {
     let mut client = QueryClient::new();
@@ -242,32 +242,23 @@ fn bootstrap(cx: &mut App) {
     client.register_deserializer::<Users, QueryError>(|v| serde_json::from_value(v.clone()).ok());
 
     let persister = FilePersister::json("/var/cache/myapp/gpui-query-cache.json");
-    let max_age = Duration::from_secs(60 * 60 * 24);
-    let filter = PersistFilter::All;
+    let opts = PersistOptions {
+        filter: PersistFilter::All,
+        max_age: Duration::from_secs(60 * 60 * 24),
+        ..PersistOptions::default()
+    };
 
-    // 2. Cold start: hydrate primes the live cache from disk. Block on it from
-    //    a background task; GPUI's background_executor is blocking-friendly.
-    cx.background_executor().spawn({
-        let persister = persister; // FilePersister is Send + Sync + Clone-free
-        async move {
-            // NOTE: hydrate needs &mut QueryClient + &mut App — drive it in a
-            // cx.update_global lease, not detached across an await holding a guard.
-        }
-    }).detach();
+    // 2. Cold start: hydrate primes the live cache from disk. It needs
+    //    &mut QueryClient + &mut App, so drive it on the main thread inside a
+    //    global lease with a blocking executor (pollster::block_on, or a test
+    //    clock), before any view reads the client:
+    //    hydrate(&mut client, &persister, &opts.filter, opts.max_age, cx)
 
     cx.set_global(ClientGlobal(client));
 
-    // (Hydrate must run inside a global lease that owns &mut App. The typical
-    // shape is a blocking `cx.run` / `block_on` for the ready load, or a
-    // spawn that re-enters via update_global. See the hydrate signature above.)
-
     // 3. Install the debounced save driver. Hold the handle for the app lifetime.
     let _handle = cx.update_global::<ClientGlobal, _>(|ClientGlobal(client), cx| {
-        client.persist_with(
-            persister,
-            PersistOptions { filter, max_age, ..PersistOptions::default() },
-            cx,
-        )
+        client.persist_with(persister, opts, cx)
     });
 }
 ```
@@ -307,10 +298,10 @@ response headers ──► cache_policy_from_headers() ──► CachePolicy ─
 
 Two independent pieces:
 
-1. **`cache_policy_from_headers`** — pure header → `CachePolicy` ("server wins"). Hand the result to `Fetched::with_policy(data, policy)` so the resource adopts the server's TTL.
-2. **`HttpCache<B>`** — a URL-keyed in-memory layer over any `HttpBackend`. Fresh entries short-circuit the network; stale entries revalidate with `If-None-Match` / `If-Modified-Since`; a `304` re-serves the cached body without transferring a new one. This is the cheap-revalidation cache that lives *inside* your fetcher, orthogonal to gpui-query's own resource cache.
+1. **`cache_policy_from_headers`**: pure header → `CachePolicy` ("server wins"). Hand the result to `Fetched::with_policy(data, policy)` so the resource adopts the server's TTL.
+2. **`HttpCache<B>`**: a URL-keyed in-memory layer over any `HttpBackend`. Fresh entries short-circuit the network; stale entries revalidate with `If-None-Match` / `If-Modified-Since`; a `304` re-serves the cached body without transferring a new one. This is the cheap-revalidation cache that lives *inside* your fetcher, orthogonal to gpui-query's own resource cache.
 
-`CacheMeta` is `Serialize + Deserialize` so a future persistence layer can store it alongside the body and rehydrate a cold start with valid `ETag`s — enabling cheap `304` refetches on the first request after launch. It uses `SystemTime` (epoch-relative, serde-supported), **never** `Instant` (no serde, meaningless across restarts).
+`CacheMeta` is `Serialize + Deserialize` so a persistence layer can store it alongside the body and rehydrate a cold start with valid `ETag`s for cheap `304` refetches right after launch. It uses `SystemTime` (epoch-relative, serde-supported), **never** `Instant` (no serde, meaningless across restarts).
 
 ---
 
@@ -323,13 +314,13 @@ pub fn cache_policy_from_headers(headers: &http::HeaderMap)
 
 Priority order (from [RFC 9111]):
 
-1. **`no-store` / `no-cache`** (any value, including bare) → `CachePolicy::NoCache`. Short-circuits immediately — a malformed trailing directive (e.g. `no-store, max-age=abc`) does NOT surface a parse error.
-2. **`s-maxage=N`** (shared-cache directive) takes precedence over `max-age=N` when both present. The chosen TTL yields `CachePolicy::Ttl { ttl_ms: N*1000 }`. If `stale-while-revalidate=M` is also present, yields `CachePolicy::StaleWhileRevalidate { ttl_ms, stale_ms: M*1000 }` instead.
+1. **`no-store` / `no-cache`** (any value, including bare) → `CachePolicy::NoCache`. Short-circuits immediately: a malformed directive elsewhere in the header (e.g. `no-store, max-age=abc`) does NOT surface a parse error.
+2. **`max-age=N`** (seconds) → `CachePolicy::Ttl { ttl_ms: N*1000 }`; add `stale-while-revalidate=M` → `CachePolicy::StaleWhileRevalidate { ttl_ms, stale_ms: M*1000 }`. When `max-age` and `s-maxage` are both present, `max-age` wins (private cache; RFC 9111 §5.2.2.10 scopes `s-maxage` to shared caches); `s-maxage` alone still sets the TTL.
 3. **Otherwise** → `CachePolicy::NoCache`. There is **no `Expires`-based heuristic** (reserved for a later addition).
 
 Directive names are matched **case-insensitively**; values may be quoted (`max-age="600"`). Multiple `Cache-Control` headers combine. Other directives (`public`, `private`, …) are ignored unless they map to a rule above.
 
-`ParseError { InvalidMaxAge(String), InvalidStaleWhileRevalidate(String) }` — only a malformed TTL value (e.g. `max-age=abc`) produces an error; wrap with `.unwrap_or(CachePolicy::NoCache)` to degrade gracefully.
+`ParseError { InvalidMaxAge(String), InvalidStaleWhileRevalidate(String) }`: only a malformed TTL value (e.g. `max-age=abc`) produces an error; wrap with `.unwrap_or(CachePolicy::NoCache)` to degrade gracefully.
 
 [RFC 9111]: https://www.rfc-editor.org/rfc/rfc9111
 
@@ -358,11 +349,11 @@ pub struct BackendResponse {
 pub trait HttpBackend: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
     fn fetch(&self, url: &str, conditionals: Conditionals)
-        -> impl Future<Output = Result<BackendResponse, Self::Error>> + Send;
+        -> impl Future<Output = Result<BackendResponse, Self::Error>> + MaybeSend;
 }
 ```
 
-The trait uses `-> impl Future + Send` (not `async fn`) so the future is guaranteed `Send` for any executor. This makes it **non-object-safe** — dispatch is static via `HttpCache<B: HttpBackend>`, no `dyn`/`Pin<Box<dyn Future>>` overhead.
+The trait uses `-> impl Future + MaybeSend` (not `async fn`). `MaybeSend` is exactly `Send` on native targets and a no-op on `wasm32`, so a native impl written with `+ Send` compiles unchanged while browser backends with `!Send` JS futures still fit. It also makes the trait **non-object-safe**; dispatch is static via `HttpCache<B: HttpBackend>`, no `dyn`/`Pin<Box<dyn Future>>` overhead.
 
 ```rust
 pub struct HttpCache<B: HttpBackend> { /* backend + two Mutex<HashMap> */ }
@@ -380,8 +371,8 @@ impl<B: HttpBackend> HttpCache<B> {
 |---|---|
 | **Fresh hit** (`stored_at + fresh_for > now`) | return cached body immediately; **backend never called** |
 | Stale / first fetch | build `Conditionals::from_meta(cached)`, call `backend.fetch` |
-| **`304 Not Modified`** | re-serve cached body + stored policy/meta; `Err(NotModifiedWithoutCachedBody)` if no cached body exists |
-| **`200 OK`** | parse policy via `cache_policy_from_headers`; if `NoCache`, serve body + store nothing; else store body + meta, return fresh triple |
+| **`304 Not Modified`** | re-serve the cached body and refresh the stored entry unless the 304's own `Cache-Control` blocks caching (`Err(NotModifiedWithoutCachedBody)` when no cached body exists) |
+| **`200 OK`** | parse policy via `cache_policy_from_headers`; if `NoCache` or malformed, serve body + store nothing; else store body + meta, return fresh triple |
 | Any other status | return body + `CachePolicy::NoCache` + `None`; nothing stored |
 
 Only `200`s with a cacheable policy populate the cache. `meta` is `None` only for non-cacheable responses.
@@ -400,7 +391,7 @@ pub enum HttpError {
 }
 ```
 
-**Concurrency:** state is guarded by two `std::sync::Mutex`es (one for meta, one for bodies). A guard is acquired, the needed value is **cloned out, and the guard dropped before any `.await` point** — so the cache never holds a `std` mutex across `.await`. It is `Send + Sync` and requires **no tokio** (works on GPUI's `background_executor`, tokio, or anything else).
+**Concurrency:** state is guarded by two `std::sync::Mutex`es (one for meta, one for bodies). A guard is acquired, the needed value is **cloned out, and the guard dropped before any `.await` point**, so the cache never holds a `std` mutex across `.await`. It is `Send + Sync` and requires **no tokio** (works on GPUI's `background_executor`, tokio, or anything else).
 
 `CacheMeta` round-trips through persistence: a non-zero `stale_for` reconstructs `StaleWhileRevalidate`, a non-zero `fresh_for` reconstructs `Ttl`, both-zero collapses to `NoCache` (mirroring `fresh_for_from_policy` / `stale_for_from_policy`).
 
@@ -419,11 +410,11 @@ impl ReqwestBackend {
 impl HttpBackend for ReqwestBackend {
     type Error = reqwest::Error;
     fn fetch(&self, url: &str, conditionals: Conditionals)
-        -> impl Future<Output = Result<BackendResponse, reqwest::Error>> + Send;
+        -> impl Future<Output = Result<BackendResponse, reqwest::Error>> + MaybeSend;
 }
 ```
 
-The request is built **synchronously** (no `.await`) — `If-None-Match` / `If-Modified-Since` attached when present — then the `send` + `bytes()` half is returned as a `Send` future. This eager build keeps the future `Send` even where `reqwest::RequestBuilder` is `!Send`. The client is reused across requests (configure TLS provider, timeouts, proxies on the `reqwest::Client` before wrapping).
+The request is built **synchronously** (no `.await`), with `If-None-Match` / `If-Modified-Since` attached when present; the `send` + `bytes()` half is returned as the future. This eager build keeps it `Send` on native targets even where `reqwest::RequestBuilder` is `!Send`. The client is reused across requests (configure TLS provider, timeouts, proxies on the `reqwest::Client` before wrapping).
 
 `reqwest` is *one* possible backend. Any client that can do a conditional `GET` and produce status + headers + body can `impl HttpBackend` and feed `HttpCache::new`.
 
@@ -440,7 +431,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Release { tag: String }
 
-// One cache per app, shared across fetchers. Wrap it in an `Arc` — `HttpCache`
+// One cache per app, shared across fetchers. Wrap it in an `Arc`: `HttpCache`
 // is NOT `Clone` (it holds `Mutex<HashMap>`s), so clone the `Arc`, not the cache.
 fn http_cache() -> std::sync::Arc<HttpCache<ReqwestBackend>> {
     std::sync::Arc::new(HttpCache::new(ReqwestBackend::from_client(reqwest::Client::new())))
@@ -451,7 +442,7 @@ fn fetch_releases(cx: &mut gpui::Context<impl 'static>) {
     let (entity, _sub) = use_query_with_policy::<Release, QueryError, _, _, _>(
         QueryOptions::new(["releases", "latest"]),
         move |_signal| {
-            let cache = cache.clone();     // cheap Arc clone — one per fetch invocation
+            let cache = cache.clone();     // cheap Arc clone, one per fetch invocation
             async move {
                 // 1. HttpCache.fetch handles fresh short-circuit / 304 revalidation.
                 let (body, policy, meta) = cache
@@ -494,7 +485,7 @@ impl<T> Fetched<T> {
 
 ---
 
-## Legacy tier (metadata-only) — steer away
+## Legacy tier (metadata-only): steer away
 
 Alongside the value-carrying `Persister`, the main crate retains an older **metadata-only** persistence API (also gated behind `persist`), kept for back-compat. It carries **no data**:
 
@@ -514,25 +505,25 @@ And on `QueryClient`:
 | Method | Behavior |
 |---|---|
 | `dehydrate(&self, cx: &App) -> DehydratedState` | collects key + `TypeId` + kind of `Success` entries only (**no data**) |
-| `hydrate(&mut self, _state, _cx)` | **no-op stub** — body is empty; callers must iterate and `set_query_data` themselves |
+| `hydrate(&mut self, _state, _cx)` | **no-op stub**: body is empty; callers must iterate and `set_query_data` themselves |
 | `persist(&self, &dyn QueryPersister, cx)` | dehydrates + saves entries (metadata-only) |
 | `restore(persister: &dyn QueryPersister) -> Vec<DehydratedEntry>` | associated fn (no `&self`); loads raw entries |
 
-Prefer the **value-carrying** `Persister` + `persist_with` + free-fn `hydrate` for any new code — it round-trips real data through the serializer/deserializer registries. The legacy types exist only to avoid breaking the old `dehydrate`/`hydrate`/`persist`/`restore` surface.
+Prefer the **value-carrying** `Persister` + `persist_with` + free-fn `hydrate` for any new code; it round-trips real data through the serializer/deserializer registries. The legacy types exist only to avoid breaking the old `dehydrate`/`hydrate`/`persist`/`restore` surface.
 
 ---
 
 ## Gotchas
 
 - **Strict deserializers are load-bearing.** `hydrate` offers every on-disk entry to every registered deserializer (O(n × m), no type discriminator). A permissive decoder that accepts a foreign shape will mis-prime the wrong bucket. Return `None` for anything that isn't unambiguously your `T`.
-- **TypeId-only registry overwrites.** `register_serializer::<T, E_a>` then `register_serializer::<T, E_b>` for the same `T` silently overwrites — both are keyed on `TypeId::of::<T>()`. Last write wins, and it applies to both `(T, E)` buckets. This is correct (the value *is* that `T`) but surprises people expecting per-`(T, E)` keying.
-- **Non-object-safe traits.** `Persister` and `HttpBackend` both return `impl Future + Send` and are consumed generically (`persist_with<P: Persister>`, `HttpCache<B: HttpBackend>`). You cannot `Box<dyn Persister>` or `Box<dyn HttpBackend>` — use an `enum` of backends or generic plumbing instead.
-- **Mutex guards never cross `.await`.** Both `HttpCache` and `FilePersister` acquire a `std::sync::Mutex`, clone the value out, and drop the guard before yielding. If you write your own `Persister`/`HttpBackend`, do the same — holding a `std` mutex across `.await` is undefined behavior (the future is `Send` but the guard often is not) and trips on some runtimes.
-- **Only `200`s are cached.** A `304` re-serves a *prior* `200` body; a `304` with no cached body is `Err(NotModifiedWithoutCachedBody)`. `no-store`/`no-cache` and non-`200`/`304` statuses store nothing.
-- **`no-store` short-circuits parsing.** `no-store, max-age=abc` returns `Ok(NoCache)` — the malformed `max-age` is never reached. Only a malformed TTL *without* a preceding `no-store`/`no-cache` yields `InvalidMaxAge`.
+- **TypeId-only registry overwrites.** `register_serializer::<T, E_a>` then `register_serializer::<T, E_b>` for the same `T` silently overwrites; both are keyed on `TypeId::of::<T>()`. Last write wins, and it applies to both `(T, E)` buckets. This is correct (the value *is* that `T`) but surprises people expecting per-`(T, E)` keying.
+- **Non-object-safe traits.** `Persister` and `HttpBackend` both return `impl Future` and are consumed generically (`persist_with<P: Persister>`, `HttpCache<B: HttpBackend>`). You cannot `Box<dyn Persister>` or `Box<dyn HttpBackend>`; use an `enum` of backends or generic plumbing instead.
+- **Mutex guards never cross `.await`.** Both `HttpCache` and `FilePersister` acquire a `std::sync::Mutex`, clone the value out, and drop the guard before yielding. If you write your own `Persister`/`HttpBackend`, do the same: holding a `std` mutex guard across `.await` usually makes the future `!Send`, so it stops compiling on executors that require `Send`.
+- **Only `200`s are cached.** A `304` re-serves a *prior* `200` body and refreshes the stored entry unless its own `Cache-Control` blocks caching; a `304` with no cached body is `Err(NotModifiedWithoutCachedBody)`. `no-store`/`no-cache` and non-`200`/`304` statuses store nothing.
+- **`no-store` short-circuits parsing.** `no-store, max-age=abc` returns `Ok(NoCache)`; the malformed `max-age` is never reached. Only a malformed TTL *without* any `no-store`/`no-cache` in the header yields `InvalidMaxAge`.
 - **macOS Metal Toolchain.** Building `client`/`hook`/`persist` (so, the persist feature and `gpui-query-persist`) fails on macOS without it: run `xcodebuild -downloadComponent MetalToolchain` once. `gpui-query-http` (core-only) is unaffected.
-- **`PersistHandle` drop stops *new* saves.** A save already parked on its debounce timer is detached and may still complete once after you drop the handle. Keep the handle for the app lifetime (store it on a long-lived view/entity) if you want continuous persistence.
-- **`Debounced saves use GPUI's timer.** In tests, the mock clock does not advance on `run_until_parked`; use `cx.background_executor().advance_clock(debounce + ε)` to mature the timer, or set `debounce: Duration::ZERO` for immediate saves.
+- **`PersistHandle` drop stops *new* saves.** A task already parked on its debounce timer still completes its final collect and save after you drop the handle. Keep the handle for the app lifetime (store it on a long-lived view/entity) if you want continuous persistence.
+- **Debounced saves use GPUI's timer.** In tests, the mock clock does not advance on `run_until_parked`; use `cx.background_executor().advance_clock(debounce + ε)` to mature the timer, or set `debounce: Duration::ZERO` for immediate saves.
 
 ---
 

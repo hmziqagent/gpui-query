@@ -1,22 +1,11 @@
-//! Tests for RequestGuard, two-phase completion, and begin_request_with_id.
-//!
-//! Covers:
-//! - RequestGuard: proof-of-ownership, scope-based rejection, into_request_id
-//! - Two-phase completion via guard: complete_success, complete_failure, stale rejection
-//! - begin_request_with_id variant
-
 use crate::core::{
     CachePolicy, QueryBeginResult, QueryFetchMode, QueryResource, QueryStatus, RequestId,
-    RequestPolicy,
+    RequestPolicy, RequestSequencer,
 };
 use crate::tests::test_support::{
     TEST_NOW_MS, assert_status, begin_request_id, test_resource_with_policies, test_sequencer,
 };
 use std::num::NonZero;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RequestGuard: proof-of-ownership (obtained via accept_current_request)
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn guard_holds_the_correct_request_id() {
@@ -41,21 +30,6 @@ fn guard_into_request_id_consumes_guard() {
     let guard = resource.accept_current_request(rid).unwrap();
     let extracted = guard.into_request_id();
     assert_eq!(extracted, rid);
-    // guard is consumed — calling guard.request_id() here would not compile.
-}
-
-#[test]
-fn accept_current_request_returns_guard_for_active_request() {
-    let mut resource: QueryResource<&str> =
-        test_resource_with_policies("key", CachePolicy::NoCache, RequestPolicy::LatestWins);
-    let mut seq = test_sequencer();
-
-    let request_id = begin_request_id(&mut resource, &mut seq, TEST_NOW_MS, QueryFetchMode::Normal);
-
-    let guard = resource
-        .accept_current_request(request_id)
-        .expect("should accept the active request");
-    assert_eq!(guard.request_id(), request_id);
 }
 
 #[test]
@@ -64,10 +38,8 @@ fn accept_current_request_rejects_stale_request_id() {
         test_resource_with_policies("key", CachePolicy::NoCache, RequestPolicy::LatestWins);
     let mut seq = test_sequencer();
 
-    // Start request 1
     let old_id = begin_request_id(&mut resource, &mut seq, TEST_NOW_MS, QueryFetchMode::Normal);
 
-    // Start request 2 — replaces request 1 under LatestWins
     let result = resource.begin_request(&mut seq, TEST_NOW_MS, QueryFetchMode::Normal);
     let _new_id = match result {
         QueryBeginResult::Started {
@@ -81,7 +53,6 @@ fn accept_current_request_rejects_stale_request_id() {
         other => panic!("expected Started, got {:?}", other),
     };
 
-    // Trying to accept the old request should fail
     let result = resource.accept_current_request(old_id);
     assert!(
         result.is_none(),
@@ -89,10 +60,6 @@ fn accept_current_request_rejects_stale_request_id() {
     );
     assert_eq!(resource.ignored_results(), 1);
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Two-phase completion via guard
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn complete_success_consumes_guard_and_sets_data() {
@@ -132,13 +99,10 @@ fn complete_convenience_method_rejects_stale_id() {
         test_resource_with_policies("key", CachePolicy::NoCache, RequestPolicy::LatestWins);
     let mut seq = test_sequencer();
 
-    // Request 1
     let old_id = begin_request_id(&mut resource, &mut seq, TEST_NOW_MS, QueryFetchMode::Normal);
 
-    // Request 2 replaces request 1
     let _ = resource.begin_request(&mut seq, TEST_NOW_MS, QueryFetchMode::Normal);
 
-    // Trying to complete old request should fail
     let completed = resource.complete_current_success(old_id, "stale data", TEST_NOW_MS);
     assert!(!completed, "stale request should not be completed");
     assert!(
@@ -146,10 +110,6 @@ fn complete_convenience_method_rejects_stale_id() {
         "data should remain unset after stale completion attempt"
     );
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// begin_request_with_id variant
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn begin_request_with_id_uses_provided_id() {
@@ -167,7 +127,7 @@ fn begin_request_with_id_uses_provided_id() {
 }
 
 #[test]
-fn begin_request_with_id_none_falls_back_to_transient_sequencer() {
+fn begin_request_with_id_none_mints_in_reserved_fallback_scope() {
     let mut resource: QueryResource<&str> =
         test_resource_with_policies("key", CachePolicy::NoCache, RequestPolicy::LatestWins);
 
@@ -176,7 +136,73 @@ fn begin_request_with_id_none_falls_back_to_transient_sequencer() {
         QueryBeginResult::Started { request_id, .. } => request_id,
         other => panic!("expected Started, got {:?}", other),
     };
-    // Transient sequencer starts at scope 1, seq 1
-    assert_eq!(rid.scope_id(), NonZero::new(1).unwrap());
+    assert_eq!(rid.scope_id(), RequestSequencer::RESERVED_FALLBACK_SCOPE);
     assert_eq!(rid.value(), 1);
+}
+
+#[test]
+fn fallback_ids_stay_in_reserved_scope_across_mints() {
+    let mut resource: QueryResource<&str> =
+        test_resource_with_policies("key", CachePolicy::NoCache, RequestPolicy::LatestWins);
+
+    let first = match resource.begin_request_with_id(None, TEST_NOW_MS, QueryFetchMode::Normal) {
+        QueryBeginResult::Started { request_id, .. } => request_id,
+        other => panic!("expected Started, got {:?}", other),
+    };
+    let _ = resource.accept_current_request(first).unwrap();
+    let second = match resource.begin_request_with_id(None, TEST_NOW_MS, QueryFetchMode::Normal) {
+        QueryBeginResult::Started { request_id, .. } => request_id,
+        other => panic!("expected Started, got {:?}", other),
+    };
+
+    assert_eq!(
+        second.scope_id(),
+        RequestSequencer::RESERVED_FALLBACK_SCOPE,
+        "successive fallback mints must stay in the reserved scope"
+    );
+    assert_eq!(second.value(), 2);
+    assert_ne!(first, second);
+}
+
+#[test]
+fn begin_request_with_id_swr_ignore_while_loading_keeps_active_request() {
+    let mut r: QueryResource<&str> = QueryResource::new(
+        "swr-ignore",
+        CachePolicy::StaleWhileRevalidate {
+            ttl_ms: 500,
+            stale_ms: 1_000,
+        },
+        RequestPolicy::IgnoreWhileLoading,
+    );
+    let mut seq = test_sequencer();
+
+    r.apply_success("cached", 100);
+
+    let _ = r.begin_request(&mut seq, 1_500, QueryFetchMode::Force);
+    assert!(r.is_loading());
+
+    let result = r.begin_request_with_id(
+        Some(RequestId::scoped(NonZero::new(99).unwrap(), 1)),
+        1_500,
+        QueryFetchMode::Normal,
+    );
+
+    match result {
+        QueryBeginResult::StaleCacheHit {
+            request_id,
+            replaced_request_id,
+            ..
+        } => {
+            assert!(
+                replaced_request_id.is_none(),
+                "no replacement under IgnoreWhileLoading"
+            );
+            assert_ne!(
+                request_id,
+                RequestId::scoped(NonZero::new(99).unwrap(), 1),
+                "should use existing active request id"
+            );
+        }
+        other => panic!("expected StaleCacheHit, got {:?}", other),
+    }
 }

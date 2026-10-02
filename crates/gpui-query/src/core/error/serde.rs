@@ -1,5 +1,3 @@
-//! Serde serialization/deserialization for [`QueryError`](super::QueryError).
-
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::types::{QueryError, QueryErrorKind};

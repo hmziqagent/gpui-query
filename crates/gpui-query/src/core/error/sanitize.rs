@@ -1,48 +1,40 @@
-//! Sanitization helpers for redacting sensitive data in error messages.
-//!
-//! Provides lightweight pattern-matching (no `regex` crate dependency) for
-//! redacting connection strings, tokens, file paths, emails, and hex keys.
+//! Redaction of sensitive patterns from error messages, without a `regex`
+//! dependency.
 
-/// Maximum length for sanitized error messages (512 characters).
+use std::borrow::Cow;
+
 pub const SANITIZE_MAX_LEN: usize = 512;
 
-/// Redact known sensitive patterns from a message string and truncate to
-/// [`SANITIZE_MAX_LEN`].
+const SCHEME_NEEDLES: [&str; 10] = [
+    "postgres://",
+    "postgresql://",
+    "mysql://",
+    "mysql2://",
+    "mongodb://",
+    "mongodb+srv://",
+    "redis://",
+    "rediss://",
+    "amqp://",
+    "mssql://",
+];
+
+const PATH_NEEDLES: [&str; 8] = [
+    "/home/",
+    "/users/",
+    "/etc/",
+    "/var/",
+    "\\home\\",
+    "\\users\\",
+    "\\etc\\",
+    "\\var\\",
+];
+
 pub(crate) fn sanitize_message(msg: &str) -> String {
-    use std::borrow::Cow;
-
-    // N6/N13: keep a Cow throughout. `replace_regex` returns `Cow<str>` and
-    // short-circuits to `Cow::Borrowed` when the pattern cannot match, so a
-    // clean message skips every allocation (the previous code unconditionally
-    // wrapped each call in `Cow::Owned`, defeating the optimization).
-    let mut out: Cow<str> = Cow::Borrowed(msg);
-
-    // Redact database connection strings.
-    out = replace_regex(
-        out,
-        r"(?i)(postgres|mysql|mongodb|redis)://\S+",
-        "[REDACTED_CONNECTION]",
-    );
-    // Redact bearer/token patterns.
-    out = replace_regex(
-        out,
-        r"(?i)(bearer\s+|token[=:]\s*)\S+",
-        "$1[REDACTED_TOKEN]",
-    );
-    // Redact common filesystem paths.
-    out = replace_regex(
-        out,
-        r"(?i)(/home/|/Users/|/etc/|/var/)\S+",
-        "[REDACTED_PATH]",
-    );
-    // Redact email addresses.
-    out = replace_regex(
-        out,
-        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-        "[REDACTED_EMAIL]",
-    );
-    // Redact long hex sequences (likely API keys or secrets).
-    out = replace_regex(out, r"\b[0-9a-fA-F]{16,}\b", "[REDACTED_HEX]");
+    let out = redact_connections(Cow::Borrowed(msg));
+    let out = redact_tokens(out);
+    let out = redact_paths(out);
+    let out = redact_emails(out);
+    let out = redact_hex_runs(out);
 
     let mut s = out.into_owned();
     if s.len() > SANITIZE_MAX_LEN {
@@ -57,109 +49,256 @@ pub(crate) fn sanitize_message(msg: &str) -> String {
     s
 }
 
-/// Redact `pattern` with `replacement` across `input`.
-///
-/// Uses a simple approach without pulling in the `regex` crate: manual
-/// scan-and-replace for each pattern. This keeps the dependency footprint
-/// minimal for a utility that only runs on DevTools / logging paths.
-///
-/// N6: returns `Cow<str>` so clean messages skip the full-text copy entirely
-/// (the input cow is returned unchanged when no match is possible). Each arm
-/// first checks a cheap `contains` guard so the heavier scan only runs when
-/// the pattern could plausibly match. Implemented on `Cow<'a, str>` (taking it
-/// by value) so the borrowed variant keeps the lifetime of the original
-/// message, allowing the chain of reassignments in `sanitize_message` to
-/// compile.
-fn replace_regex<'a>(
-    mut input: std::borrow::Cow<'a, str>,
-    pattern: &str,
-    replacement: &str,
-) -> std::borrow::Cow<'a, str> {
-    // Operate on the current contents (borrowed or owned) via a single
-    // `&str` view. When no redaction is needed, return `input` unchanged so
-    // a borrowed input stays borrowed (N6/N13).
-    let text: &str = &input;
-    // Lightweight pattern matching without the regex crate.
-    // We only handle the specific patterns used by `sanitize_message`.
-    let owned = match pattern {
-        // Database connection strings. N11: pre-compute the needles once.
-        p if p.contains("postgres")
-            || p.contains("mysql")
-            || p.contains("mongodb")
-            || p.contains("redis") =>
-        {
-            // N6: cheap guard — no scheme needle can match, so skip.
-            if !contains_any_scheme(&text.to_ascii_lowercase()) {
-                return input;
+/// ASCII-case-insensitive `contains` without allocating a lowercased copy.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn redact_connections(input: Cow<'_, str>) -> Cow<'_, str> {
+    if !SCHEME_NEEDLES.iter().any(|n| contains_ascii_ci(&input, n)) {
+        return input;
+    }
+    // ASCII lowercasing preserves byte offsets, so `lower` indexes are valid in `input`.
+    let lower = input.to_ascii_lowercase();
+    redact_until_whitespace(&input, &lower, &SCHEME_NEEDLES, "[REDACTED_CONNECTION]").into()
+}
+
+fn redact_paths(input: Cow<'_, str>) -> Cow<'_, str> {
+    if !PATH_NEEDLES.iter().any(|n| contains_ascii_ci(&input, n)) {
+        return input;
+    }
+    let lower = input.to_ascii_lowercase();
+    redact_until_whitespace(&input, &lower, &PATH_NEEDLES, "[REDACTED_PATH]").into()
+}
+
+/// Per-needle cursors only advance: a `find` returning `None` stays `None` for every later offset, so each needle scans the message once in total.
+fn redact_until_whitespace(text: &str, lower: &str, needles: &[&str], replacement: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut offset = 0;
+    let mut next_match: Vec<Option<usize>> = needles.iter().map(|n| lower.find(n)).collect();
+    loop {
+        let earliest = next_match.iter().flatten().copied().min();
+        match earliest {
+            Some(start) => {
+                let end = text[start..]
+                    .find(char::is_whitespace)
+                    .map_or(text.len(), |i| start + i);
+                result.push_str(&text[offset..start]);
+                result.push_str(replacement);
+                offset = end;
+                if offset >= text.len() {
+                    break;
+                }
+                for (needle, next) in needles.iter().zip(next_match.iter_mut()) {
+                    if next.is_some_and(|pos| pos < offset) {
+                        *next = lower[offset..].find(needle).map(|rel| offset + rel);
+                    }
+                }
             }
-            redact_url_schemes(
-                text,
-                &["postgres", "mysql", "mongodb", "redis"],
-                replacement,
-            )
-        }
-        // Bearer/token patterns.
-        p if p.contains("bearer") || p.contains("token") => {
-            let lower = text.to_ascii_lowercase();
-            if !lower.contains("bearer") && !lower.contains("token") {
-                return input;
+            None => {
+                result.push_str(&text[offset..]);
+                break;
             }
-            redact_tokens(text, replacement)
         }
-        // Filesystem paths.
-        p if p.contains("/home/")
-            || p.contains("/Users/")
-            || p.contains("/etc/")
-            || p.contains("/var/") =>
-        {
-            let lower = text.to_ascii_lowercase();
-            if !lower.contains("/home/")
-                && !lower.contains("/users/")
-                && !lower.contains("/etc/")
-                && !lower.contains("/var/")
-            {
-                return input;
+    }
+    result
+}
+
+fn redact_tokens(input: Cow<'_, str>) -> Cow<'_, str> {
+    if !contains_ascii_ci(&input, "bearer") && !contains_ascii_ci(&input, "token") {
+        return input;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < len {
+        match try_match_token(&chars, &lower, i) {
+            Some((verbatim_end, resume)) => {
+                for c in &chars[i..verbatim_end] {
+                    result.push(*c);
+                }
+                result.push_str("[REDACTED_TOKEN]");
+                i = resume;
             }
-            redact_paths(text, &["/home/", "/Users/", "/etc/", "/var/"], replacement)
-        }
-        // Email addresses.
-        p if p.contains("@") && p.contains(".") => {
-            if !text.contains('@') {
-                return input;
+            None => {
+                result.push(chars[i]);
+                i += 1;
             }
-            redact_emails(text, replacement)
         }
-        // Long hex sequences.
-        p if p.contains("0-9a-f") => {
-            if !has_long_hex_run(text) {
-                return input;
-            }
-            redact_hex(text, replacement)
-        }
-        // N30: unknown pattern. Every pattern passed to `replace_regex`
-        // must have a matching arm — surface a missing arm in debug builds
-        // instead of silently no-oping.
-        _ => {
-            debug_assert!(false, "replace_regex: unrecognized pattern {pattern:?}");
-            return input;
-        }
+    }
+    result.into()
+}
+
+/// Grammar `keyword [ws|:|=]* token`; `token` requires at least one `:`/`=` in the run while `bearer` accepts any, and the tuple is (verbatim prefix end, resume index past the redacted token).
+fn try_match_token(chars: &[char], lower: &[char], i: usize) -> Option<(usize, usize)> {
+    let (keyword_len, sep_required) = if lower_matches_at(lower, i, "bearer") {
+        (6, false)
+    } else if lower_matches_at(lower, i, "token") {
+        (5, true)
+    } else {
+        return None;
     };
-    // A redaction actually happened; install the owned result.
-    input = std::borrow::Cow::Owned(owned);
-    input
+    let len = chars.len();
+    let mut j = i + keyword_len;
+    let mut saw_ws = false;
+    let mut saw_sep = false;
+    while j < len {
+        let c = chars[j];
+        if c.is_ascii_whitespace() {
+            saw_ws = true;
+        } else if c == ':' || c == '=' {
+            saw_sep = true;
+        } else {
+            break;
+        }
+        j += 1;
+    }
+    if !saw_sep && (sep_required || !saw_ws) {
+        return None;
+    }
+
+    let verbatim_end = j;
+    while j < len && !chars[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    Some((verbatim_end, j))
 }
 
-/// N6 guard: whether `lower` (already lowercased) contains any of the
-/// recognized URL-scheme needles.
-fn contains_any_scheme(lower: &str) -> bool {
-    // N11: pre-computed const table of the literal "scheme://" needles so we
-    // avoid re-allocating `format!("{scheme}://")` per scheme per loop
-    // iteration in `redact_url_schemes`, and reuse it here for the cheap guard.
-    const SCHEME_NEEDLES: [&str; 4] = ["postgres://", "mysql://", "mongodb://", "redis://"];
-    SCHEME_NEEDLES.iter().any(|needle| lower.contains(needle))
+fn lower_matches_at(lower: &[char], i: usize, pat: &str) -> bool {
+    let pb = pat.as_bytes();
+    if i + pb.len() > lower.len() {
+        return false;
+    }
+    for (k, &b) in pb.iter().enumerate() {
+        if lower[i + k] != b as char {
+            return false;
+        }
+    }
+    true
 }
 
-/// N6 guard: whether `text` contains a run of 16+ hex digits.
+fn redact_emails(input: Cow<'_, str>) -> Cow<'_, str> {
+    if !input.contains('@') {
+        return input;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < len {
+        if let Some(email_end) = try_match_email(&chars, i) {
+            result.push_str("[REDACTED_EMAIL]");
+            i = email_end;
+        } else if chars[i].is_alphanumeric() || chars[i] == '_' {
+            // The failed candidate scanned a local run whose every interior
+            // start fails identically, so resume at the run's first
+            // non-local char instead of re-walking it one char at a time.
+            let mut resume = i;
+            while resume < len && is_email_local(chars[resume]) {
+                resume += 1;
+            }
+            for c in &chars[i..resume] {
+                result.push(*c);
+            }
+            i = resume;
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result.into()
+}
+
+fn is_email_local(c: char) -> bool {
+    c.is_alphanumeric() || "_.%+-".contains(c)
+}
+
+/// TLD contract: >= 2 chars, all-alphanumeric, letter-first or >= 2 letters (`c0m`/`c0`/`0rg` redact; `2x`, `1.2.10` pass); the TLD slice is bounded by the last domain dot, falling back to `@` for dotless domains (`user@intranet` redacts), and a trailing FQDN dot is trimmed for the slice but stays inside the redaction.
+fn try_match_email(chars: &[char], start: usize) -> Option<usize> {
+    let len = chars.len();
+    if start >= len {
+        return None;
+    }
+
+    let mut i = start;
+    if !chars[i].is_alphanumeric() && chars[i] != '_' {
+        return None;
+    }
+    while i < len && (chars[i].is_alphanumeric() || "_.%+-".contains(chars[i])) {
+        i += 1;
+    }
+    if i >= len || chars[i] != '@' {
+        return None;
+    }
+    let at = i;
+    i += 1;
+
+    if i >= len || !chars[i].is_alphanumeric() {
+        return None;
+    }
+    while i < len && (chars[i].is_alphanumeric() || ".-".contains(chars[i])) {
+        i += 1;
+    }
+
+    let scan_end = i;
+    while i > start && chars[i - 1] == '.' {
+        i -= 1;
+    }
+
+    let domain_end = i;
+    if domain_end <= start + 2 {
+        return None;
+    }
+    let dot_pos = (at + 1..domain_end)
+        .rev()
+        .find(|&j| chars[j] == '.')
+        .unwrap_or(at);
+    let tld = &chars[dot_pos + 1..domain_end];
+    let letters = tld.iter().filter(|c| c.is_alphabetic()).count();
+    if tld.len() >= 2
+        && tld.iter().all(|c| c.is_alphanumeric())
+        && (tld[0].is_alphabetic() || letters >= 2)
+    {
+        Some(scan_end)
+    } else {
+        None
+    }
+}
+
+fn redact_hex_runs(input: Cow<'_, str>) -> Cow<'_, str> {
+    if !has_long_hex_run(&input) {
+        return input;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < len {
+        if chars[i].is_ascii_hexdigit() {
+            let start = i;
+            while i < len && chars[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            if i - start >= 16 {
+                result.push_str("[REDACTED_HEX]");
+            } else {
+                for c in &chars[start..i] {
+                    result.push(*c);
+                }
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result.into()
+}
+
 fn has_long_hex_run(text: &str) -> bool {
     let mut run = 0usize;
     for c in text.chars() {
@@ -175,253 +314,21 @@ fn has_long_hex_run(text: &str) -> bool {
     false
 }
 
-/// Redact URL-like connection strings starting with any of `schemes`.
-fn redact_url_schemes(text: &str, _schemes: &[&str], replacement: &str) -> String {
-    // N11: pre-computed const table of the literal "scheme://" needles instead
-    // of re-allocating `format!("{scheme}://")` per scheme per loop iteration.
-    const SCHEME_NEEDLES: [&str; 4] = ["postgres://", "mysql://", "mongodb://", "redis://"];
-
-    let lower = text.to_ascii_lowercase();
-    let mut result = String::with_capacity(text.len());
-    let mut offset = 0;
-    loop {
-        let mut earliest: Option<usize> = None;
-        for needle in SCHEME_NEEDLES {
-            if let Some(rel) = lower[offset..].find(needle) {
-                let abs = offset + rel;
-                match earliest {
-                    None => earliest = Some(abs),
-                    Some(ep) if abs < ep => earliest = Some(abs),
-                    _ => {}
-                }
-            }
-        }
-        match earliest {
-            Some(abs_pos) => {
-                let end = text[abs_pos..]
-                    .find(|c: char| c.is_whitespace())
-                    .map_or(text.len(), |i| abs_pos + i);
-                result.push_str(&text[offset..abs_pos]);
-                result.push_str(replacement);
-                offset = end;
-                if offset >= text.len() {
-                    break;
-                }
-            }
-            None => {
-                result.push_str(&text[offset..]);
-                break;
-            }
-        }
-    }
-    result
-}
-
-/// Redact bearer/token patterns.
-fn redact_tokens(text: &str, replacement: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        if lower_matches_at(&lower, i, "bearer ") {
-            for c in &chars[i..i + 7] {
-                result.push(*c);
-            }
-            i += 7;
-            while i < len && !chars[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            result.push_str(replacement);
-            continue;
-        }
-        if lower_matches_at(&lower, i, "token=") || lower_matches_at(&lower, i, "token:") {
-            for c in &chars[i..i + 6] {
-                result.push(*c);
-            }
-            i += 6;
-            while i < len && !chars[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            result.push_str(replacement);
-            continue;
-        }
-        result.push(chars[i]);
-        i += 1;
-    }
-    result
-}
-
-/// Check whether `lower` contains the ASCII `pat` (already-lowercased) at index `i`.
-fn lower_matches_at(lower: &[char], i: usize, pat: &str) -> bool {
-    let pb = pat.as_bytes();
-    if i + pb.len() > lower.len() {
-        return false;
-    }
-    for (k, &b) in pb.iter().enumerate() {
-        if lower[i + k] != b as char {
-            return false;
-        }
-    }
-    true
-}
-
-/// Redact filesystem paths starting with any of `prefixes`.
-fn redact_paths(text: &str, prefixes: &[&str], replacement: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut result = String::with_capacity(text.len());
-    let mut offset = 0;
-    loop {
-        let mut earliest: Option<usize> = None;
-        for prefix in prefixes {
-            if let Some(rel) = lower[offset..].find(prefix) {
-                let abs = offset + rel;
-                match earliest {
-                    None => earliest = Some(abs),
-                    Some(ep) if abs < ep => earliest = Some(abs),
-                    _ => {}
-                }
-            }
-        }
-        match earliest {
-            Some(abs_pos) => {
-                let end = text[abs_pos..]
-                    .find(|c: char| c.is_whitespace())
-                    .map_or(text.len(), |i| abs_pos + i);
-                result.push_str(&text[offset..abs_pos]);
-                result.push_str(replacement);
-                offset = end;
-                if offset >= text.len() {
-                    break;
-                }
-            }
-            None => {
-                result.push_str(&text[offset..]);
-                break;
-            }
-        }
-    }
-    result
-}
-
-/// Redact email addresses (simple heuristic: word@word.word).
-fn redact_emails(text: &str, replacement: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut i = 0;
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-
-    while i < len {
-        // Try to match an email starting at position i.
-        if let Some(email_end) = try_match_email(&chars, i) {
-            result.push_str(replacement);
-            i = email_end;
-            continue;
-        }
-        result.push(chars[i]);
-        i += 1;
-    }
-    result
-}
-
-/// Try to match an email at position `start` in `chars`. Returns end index if matched.
-fn try_match_email(chars: &[char], start: usize) -> Option<usize> {
-    let len = chars.len();
-    if start >= len {
-        return None;
-    }
-
-    // Local part: alphanumeric + ._%+-
-    let mut i = start;
-    if i >= len || !chars[i].is_alphanumeric() {
-        return None;
-    }
-    while i < len && (chars[i].is_alphanumeric() || ".%+-".contains(chars[i])) {
-        i += 1;
-    }
-    if i >= len || chars[i] != '@' {
-        return None;
-    }
-    i += 1; // skip '@'
-
-    // Domain: alphanumeric + .-
-    if i >= len || !chars[i].is_alphanumeric() {
-        return None;
-    }
-    while i < len && (chars[i].is_alphanumeric() || ".-".contains(chars[i])) {
-        i += 1;
-    }
-
-    // Must end with a dot followed by 2+ alpha chars (TLD).
-    let domain_end = i;
-    if domain_end > start + 2 {
-        // Walk backwards to find last dot in the matched portion.
-        let mut last_dot = None;
-        for j in (start..domain_end).rev() {
-            if chars[j] == '.' {
-                last_dot = Some(j);
-                break;
-            }
-        }
-        if let Some(dot_pos) = last_dot {
-            let tld_len = domain_end - dot_pos - 1;
-            if tld_len >= 2
-                && chars[dot_pos + 1..domain_end]
-                    .iter()
-                    .all(|c| c.is_alphabetic())
-            {
-                return Some(domain_end);
-            }
-        }
-    }
-    None
-}
-
-/// Redact long hex sequences (16+ hex chars).
-fn redact_hex(text: &str, replacement: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut i = 0;
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-
-    while i < len {
-        if chars[i].is_ascii_hexdigit() {
-            // Count consecutive hex chars.
-            let start = i;
-            while i < len && chars[i].is_ascii_hexdigit() {
-                i += 1;
-            }
-            if i - start >= 16 {
-                result.push_str(replacement);
-            } else {
-                for c in &chars[start..i] {
-                    result.push(*c);
-                }
-            }
-        } else {
-            result.push(chars[i]);
-            i += 1;
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn redact_tokens_handles_non_ascii_without_panic() {
-        let out = redact_tokens("x café bearer secret", "");
+        let out = redact_tokens(Cow::Borrowed("x café bearer secret"));
         assert!(out.contains("café"));
         assert!(!out.contains("secret"));
+        assert!(out.contains("[REDACTED_TOKEN]"));
     }
 
     #[test]
     fn redact_tokens_preserves_bearer_redaction_on_ascii() {
-        let out = redact_tokens("auth failed: bearer abc123token", "[REDACTED_TOKEN]");
+        let out = redact_tokens(Cow::Borrowed("auth failed: bearer abc123token"));
         assert!(!out.contains("abc123token"));
         assert!(out.contains("[REDACTED_TOKEN]"));
         assert!(out.contains("auth failed: bearer "));
@@ -429,11 +336,35 @@ mod tests {
 
     #[test]
     fn redact_tokens_redacts_token_equals_with_non_ascii_prefix() {
-        let out = redact_tokens("café token=leak", "[REDACTED_TOKEN]");
+        let out = redact_tokens(Cow::Borrowed("café token=leak"));
         assert!(out.contains("café "));
         assert!(out.contains("token="));
         assert!(!out.contains("leak"));
         assert!(out.contains("[REDACTED_TOKEN]"));
+    }
+
+    #[test]
+    fn redact_tokens_tolerates_tab_after_bearer() {
+        let out = redact_tokens(Cow::Borrowed("auth failed: bearer\tabc123"));
+        assert!(!out.contains("abc123"));
+        assert!(out.contains("bearer\t"));
+        assert!(out.contains("[REDACTED_TOKEN]"));
+    }
+
+    #[test]
+    fn redact_tokens_tolerates_space_after_equals() {
+        let out = redact_tokens(Cow::Borrowed("token= abc123"));
+        assert!(out.contains("token= "));
+        assert!(!out.contains("abc123"));
+        assert!(out.contains("[REDACTED_TOKEN]"));
+    }
+
+    #[test]
+    fn redact_users_path_mixed_case() {
+        let msg = "error in /Users/admin/.env leaked";
+        let out = sanitize_message(msg);
+        assert!(!out.contains("/Users/admin/.env"));
+        assert!(out.contains("[REDACTED_PATH]"));
     }
 
     #[test]
@@ -464,5 +395,107 @@ mod tests {
         let out = sanitize_message(&msg);
         assert!(out.ends_with("...[truncated]"));
         assert!(out.len() <= SANITIZE_MAX_LEN + "...[truncated]".len());
+    }
+
+    #[test]
+    fn sanitize_message_redacts_canonical_and_tls_scheme_variants() {
+        for scheme in [
+            "postgresql://",
+            "rediss://",
+            "mongodb+srv://",
+            "mysql2://",
+            "amqp://",
+            "mssql://",
+        ] {
+            let out = sanitize_message(&format!("connect {scheme}user:pass@host/db failed"));
+            assert!(out.contains("[REDACTED_CONNECTION]"), "{scheme}");
+            assert!(!out.contains("user:pass@host"), "{scheme}");
+            assert!(!out.contains(scheme), "{scheme}");
+        }
+    }
+
+    #[test]
+    fn sanitize_message_redacts_uppercase_scheme_spellings() {
+        for scheme in [
+            "POSTGRES://",
+            "POSTGRESQL://",
+            "REDISS://",
+            "MONGODB+SRV://",
+        ] {
+            let out = sanitize_message(&format!("CONNECT {scheme}user:pass@host/db FAILED"));
+            assert!(out.contains("[REDACTED_CONNECTION]"), "{scheme}");
+            assert!(!out.contains("user:pass@host"), "{scheme}");
+        }
+    }
+
+    #[test]
+    fn sanitize_message_redacts_windows_style_paths() {
+        for (path, secret) in [
+            (r"C:\Users\alice\.env", "alice"),
+            (r"C:\home\dev\.aws", ".aws"),
+            (r"copied C:\etc\secrets.conf", "secrets"),
+            (r"C:\var\log\app.log", "app.log"),
+        ] {
+            let out = sanitize_message(path);
+            assert!(out.contains("[REDACTED_PATH]"), "{path}");
+            assert!(!out.contains(secret), "{path}");
+        }
+    }
+
+    #[test]
+    fn sanitize_message_redacts_connection_password_without_partial_leak() {
+        let out = sanitize_message("rediss://admin:P@ssw0rd!@cache.internal:6379/0 refused");
+        assert_eq!(out, "[REDACTED_CONNECTION] refused");
+    }
+
+    #[test]
+    fn redact_until_whitespace_redacts_each_needle_match_once() {
+        let text = "a /etc/x b /var/y c";
+        let lower = text.to_ascii_lowercase();
+        let out = redact_until_whitespace(text, &lower, &PATH_NEEDLES, "[REDACTED_PATH]");
+        assert_eq!(out, "a [REDACTED_PATH] b [REDACTED_PATH] c");
+    }
+
+    #[test]
+    fn redact_until_whitespace_consumes_matches_inside_redacted_span() {
+        let text = "x /var//home y";
+        let lower = text.to_ascii_lowercase();
+        let out = redact_until_whitespace(text, &lower, &PATH_NEEDLES, "[REDACTED_PATH]");
+        assert_eq!(out, "x [REDACTED_PATH] y");
+    }
+
+    #[test]
+    fn sanitize_message_stays_linear_on_large_pathological_input() {
+        let unit = "postgres://u:p@h/db /home/alice/.env rejected. ";
+        let msg = unit.repeat(256 * 1024 / unit.len());
+        assert!(msg.len() >= 256 * 1024 - unit.len());
+        let start = std::time::Instant::now();
+        let out = sanitize_message(&msg);
+        assert!(
+            start.elapsed().as_secs_f64() < 1.0,
+            "sanitizing 256KiB took {:?}",
+            start.elapsed()
+        );
+        assert!(out.contains("[REDACTED_CONNECTION]"));
+        assert!(out.contains("[REDACTED_PATH]"));
+    }
+
+    #[test]
+    fn sanitize_message_stays_linear_on_large_failed_email_local_run() {
+        let local = "a".repeat(64 * 1024);
+        let msg = format!("{local}@x!");
+        let start = std::time::Instant::now();
+        let out = sanitize_message(&msg);
+        assert!(
+            start.elapsed().as_secs_f64() < 1.0,
+            "sanitizing a 64KiB failed-candidate local part took {:?}",
+            start.elapsed()
+        );
+        assert!(!out.contains("[REDACTED_EMAIL]"));
+        let direct = redact_emails(Cow::Borrowed(msg.as_str()));
+        assert_eq!(
+            direct, msg,
+            "a failed-candidate local run must pass through unchanged"
+        );
     }
 }

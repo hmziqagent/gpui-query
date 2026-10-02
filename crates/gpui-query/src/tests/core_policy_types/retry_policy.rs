@@ -1,11 +1,5 @@
-//! Tests for RetryPolicy and RefetchTrigger.
-
 use crate::core::*;
 use crate::tests::test_support::assert_serde_roundtrip;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RetryPolicy
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn retry_policy_default_is_3_with_exponential() {
@@ -50,7 +44,6 @@ fn retry_policy_builder_chain() {
 #[test]
 fn retry_policy_delay_for_attempt_linear_without_backoff() {
     let policy = RetryPolicy::new(3).with_delay(200);
-    // Without exponential backoff, delay is constant regardless of attempt
     assert_eq!(policy.delay_for_attempt(0), 200);
     assert_eq!(policy.delay_for_attempt(1), 200);
     assert_eq!(policy.delay_for_attempt(5), 200);
@@ -64,14 +57,13 @@ fn retry_policy_delay_for_attempt_exponential() {
         .with_exponential_backoff()
         .with_max_delay(10_000);
 
-    assert_eq!(policy.delay_for_attempt(0), 100); // 100 * 2^0 = 100
-    assert_eq!(policy.delay_for_attempt(1), 200); // 100 * 2^1 = 200
-    assert_eq!(policy.delay_for_attempt(2), 400); // 100 * 2^2 = 400
-    assert_eq!(policy.delay_for_attempt(3), 800); // 100 * 2^3 = 800
-    assert_eq!(policy.delay_for_attempt(4), 1600); // 100 * 2^4 = 1600
-    assert_eq!(policy.delay_for_attempt(5), 3200); // 100 * 2^5 = 3200
-    assert_eq!(policy.delay_for_attempt(6), 6400); // 100 * 2^6 = 6400
-    // 100 * 2^7 = 12800, capped by max_delay=10000
+    assert_eq!(policy.delay_for_attempt(0), 100);
+    assert_eq!(policy.delay_for_attempt(1), 200);
+    assert_eq!(policy.delay_for_attempt(2), 400);
+    assert_eq!(policy.delay_for_attempt(3), 800);
+    assert_eq!(policy.delay_for_attempt(4), 1600);
+    assert_eq!(policy.delay_for_attempt(5), 3200);
+    assert_eq!(policy.delay_for_attempt(6), 6400);
     assert_eq!(policy.delay_for_attempt(7), 10_000);
 }
 
@@ -81,7 +73,6 @@ fn retry_policy_delay_for_attempt_capped_by_absolute_max() {
         .with_delay(u64::MAX)
         .with_exponential_backoff()
         .with_max_delay(u64::MAX);
-    // delay * 2^62 overflows => u64::MAX, then capped by ABSOLUTE_MAX_DELAY_MS = 3_600_000
     let delay = policy.delay_for_attempt(62);
     assert_eq!(delay, 3_600_000);
 }
@@ -92,11 +83,8 @@ fn retry_policy_delay_for_attempt_shift_capped_at_62() {
         .with_delay(1)
         .with_exponential_backoff()
         .with_max_delay(u64::MAX);
-    // shift is capped at 62, so 1 << 62 = 4611686018427387904,
-    // but ABSOLUTE_MAX_DELAY_MS (3_600_000) still caps it.
     let delay = policy.delay_for_attempt(62);
     assert_eq!(delay, 3_600_000, "delay capped by absolute max");
-    // Attempt 63 should produce the same (also capped)
     let delay_63 = policy.delay_for_attempt(63);
     assert_eq!(delay_63, 3_600_000, "delay still capped by absolute max");
 }
@@ -120,7 +108,6 @@ fn retry_policy_should_retry_zero_max() {
 
 #[test]
 fn retry_policy_serde_roundtrip() {
-    // T10: shared roundtrip helper.
     assert_serde_roundtrip(&[
         RetryPolicy::new(5)
             .with_delay(200)
@@ -139,10 +126,6 @@ fn retry_policy_equality() {
     assert_eq!(a, b);
     assert_ne!(a, c);
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RefetchTrigger
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn refetch_trigger_default_is_always() {
@@ -167,7 +150,6 @@ fn refetch_trigger_equality_and_copy() {
 
 #[test]
 fn refetch_trigger_serde_roundtrip() {
-    // T10: shared roundtrip helper.
     assert_serde_roundtrip(&[
         RefetchTrigger::Always,
         RefetchTrigger::IfStale,
