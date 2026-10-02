@@ -131,10 +131,10 @@ Get a clone of the cancellation signal for a resource. Pass this to an async fet
 ### `set_query_data`
 
 ```rust
-fn set_query_data<T, E>(&mut self, key: &QueryKey, data: T, cx: &mut App) -> bool
+fn set_query_data<T, E>(&mut self, key: impl Into<QueryKey>, data: T, cx: &mut App)
 ```
 
-Set data on a resource without completing a request. The previous data is saved internally so you can roll it back. Returns `true` if the resource was found and updated.
+Set data on a resource without completing a request. The resource is created if it does not exist, and the previous data is kept so a later write can restore it. Observers are notified and the persist snapshot is marked dirty.
 
 Use this for optimistic updates: update the cache immediately, then let the mutation result or a refetch correct it later.
 
@@ -143,28 +143,28 @@ let client = cx.global_mut::<QueryClient>();
 
 // Optimistically add the new user to the list
 client.set_query_data::<Vec<User>, MyError>(
-    &users_key,
+    users_key.clone(),
     updated_user_list,
     cx,
 );
 ```
 
-### `rollback_query_data`
+### Rolling back an optimistic update
+
+There is no dedicated rollback method. Capture the previous value with `get_query_data` (returns `None` when no data is stored) before the optimistic write, then restore it with `set_query_data` if the mutation fails:
 
 ```rust
-fn rollback_query_data<T, E>(&mut self, key: &QueryKey, cx: &mut App) -> bool
-```
-
-Undo the last optimistic update. Restores the data that was stored before `set_query_data` was called. Returns `true` if there was previous data to restore.
-
-A typical pattern is to optimistically update, then roll back if the mutation fails:
-
-```rust
-client.set_query_data::<Vec<User>, MyError>(&key, optimistic_data, cx);
+let client = cx.global_mut::<QueryClient>();
+let previous = client.get_query_data::<Vec<User>, MyError>(&key, cx);
+client.set_query_data::<Vec<User>, MyError>(key.clone(), optimistic_data, cx);
 
 // ... later, if the mutation fails ...
-client.rollback_query_data::<Vec<User>, MyError>(&key, cx);
+if let Some(previous) = previous {
+    client.set_query_data::<Vec<User>, MyError>(key.clone(), previous, cx);
+}
 ```
+
+`set_query_data` notifies observers, so mounted views re-render with the restored data and the persist driver saves the change. Calling `rollback_to_previous()` on the resource entity restores the same value but does not notify observers.
 
 ## Bulk operations
 

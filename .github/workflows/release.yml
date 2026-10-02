@@ -17,9 +17,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # No `workspaces` override: the repo root is the workspace root and
+      # rust-cache resolves the default "." against GITHUB_WORKSPACE, not the
+      # job's working-directory — the old "crates/gpui-query -> target"
+      # mapping cached a directory cargo never writes. The working-directory
+      # on the run steps below is unaffected.
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "crates/gpui-query -> target"
 
       - name: Verify version matches tag
         working-directory: crates/gpui-query

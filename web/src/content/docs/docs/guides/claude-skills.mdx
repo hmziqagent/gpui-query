@@ -1,0 +1,54 @@
+---
+sidebar_position: 9
+title: Claude Code skills
+description: "Install gpui-query's Claude Code skills so your AI assistant writes correct hooks, caching, retry, and persistence code without guessing the API."
+---
+
+gpui-query ships two [Claude Code](https://claude.com/claude-code) skills — self-contained knowledge packs that teach an AI assistant the real gpui-query API (exact signatures, defaults, lifecycle, and gotchas). Install them once and the assistant stops guessing how `use_query`, `CachePolicy`, `persist_with`, or `HttpCache` work.
+
+:::note
+These use the standard [Claude Code skill format](https://docs.claude.com/en/docs/claude-code/skills), so they work in the Claude Code CLI, desktop app, web, and IDE extensions. They activate automatically based on what you're working on — you don't invoke them by hand.
+:::
+
+## What you get
+
+| Skill | Covers |
+|---|---|
+| `gpui-query` | The essentials: `use_query`, `use_mutation`, `use_infinite_query`, `use_query_select`, in-memory `CachePolicy` (TTL / stale-while-revalidate / no-cache), `RetryPolicy`, `QueryKey` filters, `QueryClient` bulk operations, observers, and GC. |
+| `gpui-query-extensions` | The satellite crates: HTTP `Cache-Control` → `CachePolicy` and an `HttpCache` layer for cheap `304` refetches (`gpui-query-http`), plus durable disk persistence with `FilePersister` and the `persist` feature (`gpui-query-persist`). |
+
+Install `gpui-query` for everyday app work; add `gpui-query-extensions` when you wire up HTTP caching or disk persistence.
+
+## Install
+
+Both skills live in the repo under [`skills/`](https://github.com/freeoxide/gpui-query/tree/master/skills). Copy them into your user-level skills directory so they're available in **every** project:
+
+```sh
+cp -R skills/gpui-query skills/gpui-query-extensions ~/.claude/skills/
+```
+
+Install just one, or fetch it without cloning the repo:
+
+```sh
+# essentials
+mkdir -p ~/.claude/skills/gpui-query
+curl -fsSL https://raw.githubusercontent.com/freeoxide/gpui-query/master/skills/gpui-query/SKILL.md \
+  -o ~/.claude/skills/gpui-query/SKILL.md
+
+# extensions
+mkdir -p ~/.claude/skills/gpui-query-extensions
+curl -fsSL https://raw.githubusercontent.com/freeoxide/gpui-query/master/skills/gpui-query-extensions/SKILL.md \
+  -o ~/.claude/skills/gpui-query-extensions/SKILL.md
+```
+
+:::tip[Verify it loaded]
+After installing, open a project that depends on gpui-query and ask the assistant something about queries or caching — the skill loads on its own. Run `/skills` to confirm both are registered.
+:::
+
+## Project-scoped alternative
+
+To pin a skill to a single repo instead of every project, drop it into that project's `.claude/skills/` directory rather than `~/.claude/skills/`. It then activates only when you're working inside that project.
+
+## Updating
+
+The skills track gpui-query **v0.2.0** (essentials) and the **v0.1.0** satellites (extensions). Each skill is a single `SKILL.md` with no other dependencies, so re-running the install command above after a `cargo update` is all it takes to refresh them.

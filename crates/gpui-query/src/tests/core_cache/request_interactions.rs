@@ -1,13 +1,7 @@
-//! Cache interactions with request policies and policy accessor tests.
-
 use crate::core::*;
 use crate::tests::core_cache::*;
 use crate::tests::test_support::*;
 use std::num::NonZero;
-
-// ══════════════════════════════════════════════════════════════════════════
-// CACHE INTERACTIONS WITH REQUEST POLICIES
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn begin_request_short_circuits_fresh_ttl_cache() {
@@ -125,6 +119,25 @@ fn record_cache_hit_does_not_clear_failure_status() {
         1,
         "cache_hits increments even when status is Failure (terminal state preserved)"
     );
+}
+
+#[test]
+fn record_cache_hit_does_not_clear_cancelled_status() {
+    let mut r = ttl_resource();
+    seed_data(&mut r, "data", STORED_AT_MS);
+
+    let mut seq = test_sequencer();
+    let _ = r.begin_request(&mut seq, STORED_AT_MS + 100, QueryFetchMode::Force);
+    r.cancel(QueryError::cancelled("abort"));
+    assert_eq!(r.status(), QueryStatus::Cancelled);
+
+    r.record_cache_hit();
+    assert_eq!(
+        r.status(),
+        QueryStatus::Cancelled,
+        "cache hit should not clear Cancelled status"
+    );
+    assert_eq!(r.cache_hits(), 1);
 }
 
 #[test]

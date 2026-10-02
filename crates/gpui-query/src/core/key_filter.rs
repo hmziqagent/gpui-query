@@ -1,19 +1,14 @@
 use super::QueryKey;
 
-/// A filter for matching query keys, used by bulk operations like
-/// `invalidate_queries`.
+/// Key matcher for bulk operations like `invalidate_queries`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryKeyFilter<'a> {
-    /// Match only the key that is exactly equal.
     Exact(&'a QueryKey),
-    /// Match all keys that start with the given prefix.
     Prefix(&'a QueryKey),
-    /// Match every key.
     All,
 }
 
 impl<'a> QueryKeyFilter<'a> {
-    /// Returns `true` if the given key matches this filter.
     pub fn matches(&self, key: &QueryKey) -> bool {
         match self {
             Self::Exact(k) => key == *k,

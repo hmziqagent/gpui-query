@@ -1,7 +1,7 @@
 /**
  * Shared helpers for scripts that read the Starlight docs
  * (src/content/docs/docs) and turn them into plain markdown:
- * generate-llms-txt.ts and generate-md-alt.ts.
+ * generate-llms-txt.ts and generate-page-alts.ts (via lib/pages.ts).
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -19,6 +19,19 @@ export interface ParsedDoc {
   frontmatter: DocFrontmatter;
   /** Body stripped down to prose markdown (no MDX/JSX/admonition syntax). */
   plain: string;
+}
+
+/**
+ * Unified page shape for the alt-format generators (`.md` / `.txt`).
+ * `route` is the output slug with no leading/trailing slash; "" means the site
+ * root (written as index.md / index.txt).
+ */
+export interface ParsedPage {
+  route: string;
+  title: string;
+  description?: string;
+  /** Prose markdown body (no frontmatter, no H1). */
+  markdown: string;
 }
 
 /** Recursively collect every .md and .mdx file under `dir`, as absolute paths. */
@@ -95,55 +108,93 @@ export function resolveRoute(relPath: string, frontmatter: DocFrontmatter): stri
  * Strip frontmatter and Docusaurus/MDX-specific syntax down to prose
  * markdown. Admonitions become blockquotes; JSX components and imports
  * are removed.
+ *
+ * Code is sacred: fenced blocks and inline code spans are stashed behind
+ * sentinels before any JSX/expression stripping and restored verbatim, so Rust
+ * generics like `Arc<AtomicBool>` and `Result<Vec<User>, MyError>` are not
+ * eaten by the JSX-tag remover.
  */
 export function toPlainMarkdown(body: string): string {
-  return (
-    body
-      // Drop ES import / export statements (MDX).
-      .replace(/^\s*import\s+.*$/gm, "")
-      .replace(/^\s*export\s+.*$/gm, "")
-      // Docusaurus admonitions :::type[title] {props} ... :::
-      // -> keep inner content as a blockquote.
-      .replace(
-        /:::[A-Za-z]+(?:\[([^\]]*)\])?(?:\s*\{[^}]*\})?\r?\n([\s\S]*?):::/g,
-        (_m, title: string | undefined, inner: string) => {
-          const header = title ? `> **${title.trim()}**\n>\n` : "";
-          const quoted = inner
-            .replace(/\r?\n$/, "")
-            .split(/\r?\n/)
-            .map((line) => `> ${line}`)
-            .join("\n");
-          return `${header}${quoted}`;
-        },
-      )
-      // Any stray admonition fences (opening/closing) without a body.
-      .replace(/:::[A-Za-z]+(?:\[([^\]]*)\])?(?:\s*\{[^}]*\})?\s*(\r?\n)?/g, "")
-      .replace(/^:::\s*$/gm, "")
-      // JSX self-closing and paired tags -> remove (children kept for paired).
-      .replace(/<[A-Z][A-Za-z0-9]*[^>]*\/>/g, "")
-      .replace(/<\/?[A-Z][A-Za-z0-9]*[^>]*>/g, "")
-      // Remove remaining inline JSX expressions like {variable} (best effort).
-      .replace(/^\s*\{[^}]*\}\s*$/gm, "")
-      // Collapse 3+ blank lines.
-      .replace(/\n{3,}/g, "\n\n")
-      .trim()
-  );
+  const store: string[] = [];
+  const stash = (m: string): string => {
+    store.push(m);
+    return `${store.length - 1}`;
+  };
+
+  // Protect fenced code blocks first (greedy, multiline), then inline code.
+  let s = body.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, stash);
+  s = s.replace(/`[^`\n]+`/g, stash);
+
+  s = s
+    // Drop ES import / export statements (MDX).
+    .replace(/^\s*import\s+.*$/gm, "")
+    .replace(/^\s*export\s+.*$/gm, "")
+    // Docusaurus admonitions :::type[title] {props} ... :::
+    // -> keep inner content as a blockquote.
+    .replace(
+      /:::[A-Za-z]+(?:\[([^\]]*)\])?(?:\s*\{[^}]*\})?\r?\n([\s\S]*?):::/g,
+      (_m, title: string | undefined, inner: string) => {
+        const header = title ? `> **${title.trim()}**\n>\n` : "";
+        const quoted = inner
+          .replace(/\r?\n$/, "")
+          .split(/\r?\n/)
+          .map((line) => `> ${line}`)
+          .join("\n");
+        return `${header}${quoted}`;
+      },
+    )
+    // Any stray admonition fences (opening/closing) without a body.
+    .replace(/:::[A-Za-z]+(?:\[([^\]]*)\])?(?:\s*\{[^}]*\})?\s*(\r?\n)?/g, "")
+    .replace(/^:::\s*$/gm, "")
+    // JSX self-closing and paired tags -> remove (children kept for paired).
+    .replace(/<[A-Z][A-Za-z0-9]*[^>]*\/>/g, "")
+    .replace(/<\/?[A-Z][A-Za-z0-9]*[^>]*>/g, "")
+    // Remove remaining inline JSX expressions like {variable} (best effort).
+    .replace(/^\s*\{[^}]*\}\s*$/gm, "")
+    // Collapse 3+ blank lines.
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // Restore protected code verbatim.
+  return s.replace(/(\d+)/g, (_m, i: string) => store[Number(i)] ?? "");
 }
 
-/** Read and parse every doc under `docsRoot`. */
+/**
+ * Read and parse every doc under `docsRoot` using Starlight-style routing
+ * (index files collapse to their directory route; a `slug` frontmatter wins).
+ */
 export async function loadDocs(docsRoot: string): Promise<ParsedDoc[]> {
-  const files = await collectDocs(docsRoot);
+  return loadMarkdownDir(docsRoot, { routeFrom: resolveRoute });
+}
+
+/**
+ * Generic markdown/MDX directory loader shared by the docs and blog
+ * collections. `routeFrom` maps a file's path + frontmatter to its route;
+ * it defaults to the docs/Starlight convention but blog passes a plain
+ * filename-stem mapper (posts are served at /blog/{stem}).
+ */
+export async function loadMarkdownDir(
+  dir: string,
+  opts: { routeFrom?: (relPath: string, frontmatter: DocFrontmatter) => string } = {},
+): Promise<ParsedDoc[]> {
+  const routeFrom = opts.routeFrom ?? resolveRoute;
+  const files = await collectDocs(dir);
   const docs: ParsedDoc[] = [];
   for (const file of files) {
     const raw = await readFile(file, "utf-8");
     const { frontmatter, body } = parseFrontmatter(raw);
-    const relPath = relative(docsRoot, file);
+    const relPath = relative(dir, file);
     docs.push({
       relPath,
-      route: resolveRoute(relPath, frontmatter),
+      route: routeFrom(relPath, frontmatter),
       frontmatter,
       plain: toPlainMarkdown(body),
     });
   }
   return docs;
+}
+
+/** Filename-stem route mapper for the blog collection (`foo.mdx` -> `foo`). */
+export function blogRoute(relPath: string): string {
+  return relPath.replace(/\.(mdx?|md)$/, "").split(sep).join("/");
 }

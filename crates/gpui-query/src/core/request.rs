@@ -1,44 +1,7 @@
-//! Request lifecycle primitives for the query system.
-//!
-//! This module provides the core types that govern how async requests are
-//! identified, sequenced, and completed within the query framework:
-//!
-//! - [`RequestId`] — a unique, ordered identifier for each in-flight request.
-//! - [`RequestSequencer`] — a monotonic generator of `RequestId` values, scoped
-//!   per resource to guarantee uniqueness even after sequence overflow.
-//! - [`RequestGuard`] — a single-use capability token that enforces the two-phase
-//!   completion protocol (accept → complete).
-//! - [`QueryTimestamp`] — a millisecond-precision timestamp used for cache
-//!   freshness and staleness calculations.
-//!
-//! # Two-phase completion protocol
-//!
-//! The query system uses a two-phase protocol to safely complete async work:
-//!
-//! 1. **Accept**: Call [`QueryResource::accept_current_request`] with a
-//!    [`RequestId`]. If the request is still active (not replaced or cancelled),
-//!    this returns `Some(RequestGuard)`. Otherwise it returns `None`.
-//!
-//! 2. **Complete**: Pass the [`RequestGuard`] (by value) to one of the
-//!    completion methods: [`QueryResource::complete_success`],
-//!    [`QueryResource::complete_failure`],
-//!    [`QueryResource::complete_success_optional`], or
-//!    [`QueryResource::complete_failure_with_data`]. The guard is consumed,
-//!    preventing double-completion.
-//!
-//! Convenience methods like [`QueryResource::complete_current_success`] combine
-//! both phases into a single call.
-//!
-//! [`QueryResource`]: super::QueryResource
-
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 
-/// A unique identifier for an in-flight request.
-///
-/// Combines a scope id (per-resource) with a monotonically increasing sequence.
-/// Two `RequestId` values are equal only when both scope and sequence match.
-/// Ordering is lexicographic: scope first, then sequence.
+/// Scoped id: equality and ordering are lexicographic (scope, then sequence).
 ///
 /// # Example
 ///
@@ -59,68 +22,38 @@ pub struct RequestId {
 }
 
 impl RequestId {
-    /// Create a request id with explicit scope and sequence.
-    ///
-    /// The scope must be non-zero; passing a zero scope would violate the
-    /// `NonZero<u64>` niche invariant, so it is taken as `NonZero<u64>` directly.
     pub fn scoped(scope_id: NonZero<u64>, sequence: u64) -> Self {
         Self { scope_id, sequence }
     }
 
-    /// The sequence number within this scope.
     pub fn value(self) -> u64 {
         self.sequence
     }
 
-    /// The scope identifier.
-    ///
-    /// Returns the scope as `NonZero<u64>`. Use `.get()` if a plain `u64` is needed.
     pub fn scope_id(self) -> NonZero<u64> {
         self.scope_id
     }
 
-    /// Human-readable label for diagnostics.
-    ///
-    /// Thin wrapper around the [`Display`](std::fmt::Display) impl that
-    /// allocates a `String`. Prefer `format!("{id}")` or writing directly to
-    /// a formatter to avoid the heap allocation for log/diagnostic callers.
-    // Audit fix #45: keep label for backward compat; Display writes directly.
+    /// Allocates a `String`; `format!("{id}")` writes the same text without
+    /// the heap allocation.
     pub fn label(self) -> String {
         self.to_string()
     }
 }
 
 impl std::fmt::Display for RequestId {
-    /// Reproduces the exact `"{scope}:{sequence}"` label format.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Audit fix #45: write directly to the formatter, avoiding a String alloc.
         write!(f, "{}:{}", self.scope_id, self.sequence)
     }
 }
 
 /// Monotonic request id generator scoped to a single resource.
 ///
-/// Each `RequestSequencer` produces a stream of [`RequestId`] values that are
-/// unique within the resource's lifetime. The sequence counter increments
-/// from 1; when it would overflow `u64::MAX`, the scope advances to avoid
-/// producing duplicate ids.
-///
-/// # Scope advancement
-///
-/// When the sequence counter reaches `u64::MAX`, [`next_request`](Self::next_request)
-/// calls [`advance_scope`](Self::advance_scope), which increments `scope_id`
-/// and resets `next_request_id` to 1. This guarantees uniqueness across
-/// the entire lifetime of the sequencer.
-///
-/// # Theoretical wrap-around
-///
-/// If `scope_id` itself overflows `u64::MAX`, it wraps back to 1 and
-/// `next_request_id` is reset to 1. This means a new `RequestId(1, 1)` could
-/// theoretically collide with a very old `RequestId(1, 1)` still held by a
-/// long-running future. In practice, reaching `u64::MAX` requests per scope
-/// is essentially impossible, so this is not a practical concern. For
-/// extremely long-lived processes (e.g., a server running for decades), the
-/// collision risk remains theoretical but documented here for completeness.
+/// The sequence increments from 1; at `u64::MAX` the scope advances and the
+/// sequence resets. If the scope itself overflows it wraps to 1, so a fresh
+/// id could theoretically collide with a very old one still held by a
+/// long-running future. Fallback mints via `next_fallback`
+/// stay in a reserved top scope, disjoint from ids minted from 1.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestSequencer {
     pub(crate) scope_id: NonZero<u64>,
@@ -133,20 +66,44 @@ impl Default for RequestSequencer {
     }
 }
 
+/// Id source for begin-request entry points: an external sequencer, or a
+/// caller-provided id falling back to the resource's own sequencer.
+pub(crate) enum MaybeRequestId<'a> {
+    FromSequencer(&'a mut RequestSequencer),
+    Provided(Option<RequestId>),
+}
+
+impl MaybeRequestId<'_> {
+    pub(crate) fn next(&mut self, fallback: &mut RequestSequencer) -> RequestId {
+        match self {
+            Self::FromSequencer(sequencer) => sequencer.next_request(),
+            Self::Provided(maybe_id) => maybe_id.unwrap_or_else(|| fallback.next_fallback()),
+        }
+    }
+}
+
 impl RequestSequencer {
-    /// Create a new sequencer starting at scope 1, sequence 1.
+    /// Reserved scope for resource-local fallback ids; `new()` sequencers
+    /// start at 1, so the two id spaces stay disjoint.
+    pub(crate) const RESERVED_FALLBACK_SCOPE: NonZero<u64> = NonZero::<u64>::MAX;
+
     pub fn new() -> Self {
         Self {
-            scope_id: NonZero::new(1).unwrap(),
+            scope_id: NonZero::<u64>::MIN,
             next_request_id: 1,
         }
     }
 
-    /// Generate the next request id.
-    ///
-    /// The sequence counter increments with each call. When it reaches
-    /// `u64::MAX`, the scope advances automatically before the next call
-    /// produces a duplicate.
+    /// Mints in the reserved fallback scope, re-scoping sequencers that start
+    /// in the shared space (fresh or deserialized resources).
+    pub(crate) fn next_fallback(&mut self) -> RequestId {
+        if self.scope_id != Self::RESERVED_FALLBACK_SCOPE {
+            self.scope_id = Self::RESERVED_FALLBACK_SCOPE;
+            self.next_request_id = 1;
+        }
+        self.next_request()
+    }
+
     pub fn next_request(&mut self) -> RequestId {
         let request_id = RequestId::scoped(self.scope_id, self.next_request_id);
         if self.next_request_id == u64::MAX {
@@ -157,43 +114,31 @@ impl RequestSequencer {
         request_id
     }
 
-    /// Advance to a new scope when the sequence overflows.
-    ///
-    /// Increments `scope_id` via checked addition. If `scope_id` itself
-    /// overflows (astronomically unlikely), it wraps to 1 and the sequence
-    /// resets, as documented on the struct.
     pub fn advance_scope(&mut self) {
         self.scope_id = NonZero::new(self.scope_id.get().checked_add(1).unwrap_or(1))
-            .unwrap_or(NonZero::new(1).unwrap());
+            .unwrap_or(NonZero::<u64>::MIN);
         self.next_request_id = 1;
     }
 
-    /// Whether the given request id belongs to the current scope.
     pub fn is_current_scope(&self, request_id: RequestId) -> bool {
         request_id.scope_id == self.scope_id
     }
 }
 
-/// A timestamp for query operations, in milliseconds since UNIX epoch.
-///
-/// Used for cache freshness checks (TTL, stale-while-revalidate) and for
-/// recording when data was last updated. Obtain the current time via
-/// `QueryTimestamp::from_millis(...)` using your application's clock.
+/// Milliseconds since the UNIX epoch, driven by the application's clock
+/// via [`QueryTimestamp::from_millis`]; core has no clock of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct QueryTimestamp(u64);
 
 impl QueryTimestamp {
-    /// Create a timestamp from milliseconds.
     pub fn from_millis(value: u64) -> Self {
         Self(value)
     }
 
-    /// The timestamp in milliseconds.
     pub fn as_millis(self) -> u64 {
         self.0
     }
 
-    /// Compute elapsed time since an earlier timestamp.
     pub(super) fn elapsed_since(self, earlier: Self) -> Option<u64> {
         self.0.checked_sub(earlier.0)
     }
@@ -205,30 +150,8 @@ impl From<u64> for QueryTimestamp {
     }
 }
 
-/// A single-use capability token proving the holder owns the current request.
-///
-/// Created by [`QueryResource::accept_current_request`], consumed by one of the
-/// `complete_*` methods. The guard is **moved** (not copied) into the
-/// completion method, which enforces the two-phase protocol at the type level:
-/// once a guard is used, it cannot be used again.
-///
-/// # Two-phase protocol
-///
-/// 1. **Accept**: `resource.accept_current_request(request_id)` validates that
-///    the request is still active and returns `Some(RequestGuard)`.
-/// 2. **Complete**: `resource.complete_success(guard, data, now_ms)` consumes
-///    the guard and applies the result. Attempting to use the guard again is a
-///    compile error because it has been moved.
-///
-/// # Why not `Copy`?
-///
-/// Previous versions derived `Clone` + `Copy`, which allowed the same guard to
-/// be passed to multiple `complete_*` calls. While the second call would be a
-/// no-op (the resource already cleared `active_request_id`), it was wasteful
-/// and could mask bugs. Taking the guard by value prevents this entirely.
-///
-/// [`QueryResource`]: super::QueryResource
-/// [`QueryResource::accept_current_request`]: super::QueryResource::accept_current_request
+/// Single-use token moved into a `complete_*` call, enforcing
+/// accept-then-complete at the type level.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub struct RequestGuard {
@@ -240,14 +163,10 @@ impl RequestGuard {
         Self { request_id }
     }
 
-    /// The request id this guard protects (borrowed).
     pub fn request_id(&self) -> RequestId {
         self.request_id
     }
 
-    /// Consume the guard and return the request id.
-    ///
-    /// Useful when you want to extract the id and discard the guard.
     pub fn into_request_id(self) -> RequestId {
         self.request_id
     }

@@ -182,21 +182,28 @@ Prefix matching is hierarchical. `Prefix(&QueryKey::from(["users"]))` matches `[
 Sometimes you want to update the UI before the server confirms the change. `set_query_data` writes a value directly into the cache, storing the previous value for rollback.
 
 ```rust
-let client = cx.global::<QueryClient>();
+let client = cx.global_mut::<QueryClient>();
 client.set_query_data::<Vec<User>, MyError>(
-    &key,
+    key.clone(),
     updated_user_list,
     cx,
 );
 ```
 
-If the mutation later fails, roll back to the previous data:
+There is no dedicated rollback method. Capture the previous value with `get_query_data` before the optimistic write, then restore it if the mutation fails:
 
 ```rust
-client.rollback_query_data::<Vec<User>, MyError>(&key, cx);
+let client = cx.global_mut::<QueryClient>();
+let previous = client.get_query_data::<Vec<User>, MyError>(&key, cx);
+client.set_query_data::<Vec<User>, MyError>(key.clone(), optimistic_data, cx);
+
+// ... later, if the mutation fails ...
+if let Some(previous) = previous {
+    client.set_query_data::<Vec<User>, MyError>(key.clone(), previous, cx);
+}
 ```
 
-This restores the data that was in the resource before `set_query_data` was called. If there was no previous data, the rollback does nothing and returns `false`.
+Restoring through `set_query_data` notifies observers and marks the persist snapshot, so mounted views re-render and the rollback is persisted. Calling `rollback_to_previous()` on the resource entity restores the same value but does not notify observers.
 
 ## Garbage collection
 

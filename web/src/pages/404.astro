@@ -3,7 +3,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 // Starlight is configured with disable404Route: true, so this page owns the
 // site-wide 404. (Ported from the NotFoundPage in routes/__root.tsx.)
 ---
-<BaseLayout title="Page not found - gpui-query" canonicalPath="/404" noindex>
+<BaseLayout title="Page not found - gpui-query" canonicalPath="/404" noindex alts={false}>
   <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
     <div class="flex min-h-[60vh] flex-col items-center justify-center text-center">
       <h1 class="text-8xl font-extrabold tracking-tighter text-primary">404</h1>

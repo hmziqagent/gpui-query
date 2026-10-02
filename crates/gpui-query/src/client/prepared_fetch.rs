@@ -1,22 +1,9 @@
-//! Prepared fetch type for imperative and prefetch query operations.
-//!
-//! [`PreparedFetch`] is returned by `QueryClient::prepare_fetch_query` and
-//! `QueryClient::prepare_prefetch_query`. It holds the entity, request ID,
-//! and cooperative cancellation signal needed to complete an async fetch.
-
 use gpui::{App, Entity};
 
 use crate::core::QueryResource;
 
-/// A prepared fetch returned by [`QueryClient::prepare_fetch_query`] or
-/// [`QueryClient::prepare_prefetch_query`].
-///
-/// Contains the entity, request ID, and cooperative cancellation signal
-/// needed to perform the async fetch and complete the resource.
-///
-/// The caller should:
-/// 1. Call their fetcher with `self.signal`
-/// 2. Use `complete_success` or `complete_failure` with the result
+/// Run your fetcher with `self.signal`, then complete via
+/// `complete_success` or `complete_failure`.
 ///
 /// # Example
 ///
@@ -38,58 +25,39 @@ use crate::core::QueryResource;
 /// ```
 #[must_use = "the prepared fetch holds the request ID and cancellation signal; dropping it without calling complete_success/complete_failure abandons the in-flight request"]
 pub struct PreparedFetch<T, E> {
-    /// The query resource entity.
     pub entity: Entity<QueryResource<T, E>>,
-    /// The request ID for the started request.
     pub request_id: crate::core::RequestId,
-    /// The cooperative cancellation signal for the in-flight request.
     pub signal: crate::core::QuerySignal,
-    /// **M3**: the wall-clock ms captured at prepare time. Reused by
-    /// `complete_success` / `complete_failure` so they don't re-syscall
-    /// `current_time_ms()` (the fetch's logical completion time is the prepare
-    /// time, matching the request's `started_at`).
+    /// The fetch's logical completion clock, captured at prepare time and
+    /// reused by the complete_* methods.
     pub(crate) now_ms: u64,
 }
 
 impl<T: Clone + Send + Sync + 'static, E: Clone + Send + Sync + 'static> PreparedFetch<T, E> {
-    /// Complete the fetch with success.
-    ///
-    /// Calls `complete_current_success` on the resource entity. If the request
-    /// ID is no longer active (replaced by a newer request), this is a no-op.
-    ///
-    /// **M3**: reuses the `now_ms` captured at prepare time instead of
-    /// re-syscalling `current_time_ms()`.
+    /// A no-op if the request ID is no longer active (replaced by a newer
+    /// request).
     pub fn complete_success(self, data: T, cx: &mut App) {
-        self.entity.update(cx, |resource, cx| {
-            let accepted = resource.complete_current_success(self.request_id, data, self.now_ms);
-            // B2: precise dirty signal for the persistence layer. Imperative
-            // completions (`prepare_fetch_query`) mutate the cache just like the
-            // hook-layer completions, so they must wake `persist_with` too —
-            // without this a resolved imperative fetch is silently never saved.
-            // Gated on `accepted` to match the hook sites (which bump inside the
-            // `accept_current_request` guard), so a stale no-op completion does
-            // not spuriously schedule a save.
-            if accepted {
-                #[cfg(feature = "persist")]
-                cx.default_global::<crate::client::CacheMutation>();
-            }
-        });
+        self.complete(Ok(data), cx);
     }
 
-    /// Complete the fetch with failure.
-    ///
-    /// Calls `complete_current_failure` on the resource entity. If the request
-    /// ID is no longer active (replaced by a newer request), this is a no-op.
-    ///
-    /// **M3**: reuses the `now_ms` captured at prepare time instead of
-    /// re-syscalling `current_time_ms()`.
+    /// A no-op if the request ID is no longer active (replaced by a newer
+    /// request).
     pub fn complete_failure(self, error: E, cx: &mut App) {
+        self.complete(Err(error), cx);
+    }
+
+    fn complete(self, outcome: Result<T, E>, cx: &mut App) {
         self.entity.update(cx, |resource, cx| {
-            let accepted = resource.complete_current_failure(self.request_id, error, self.now_ms);
-            // B2: see `complete_success` — bump only when the failure was
-            // actually accepted, so an imperative failure is visible to
-            // `persist_with` without spurious saves on stale completions.
+            let accepted = match outcome {
+                Ok(data) => resource.complete_current_success(self.request_id, data, self.now_ms),
+                Err(error) => {
+                    resource.complete_current_failure(self.request_id, error, self.now_ms)
+                }
+            };
+            // Wake observers and the persistence driver only when accepted; a
+            // stale no-op must not re-render or schedule a save.
             if accepted {
+                cx.notify();
                 #[cfg(feature = "persist")]
                 cx.default_global::<crate::client::CacheMutation>();
             }

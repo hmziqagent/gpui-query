@@ -4,7 +4,6 @@
 // footer, Firebase Analytics, and explicit per-page metadata.
 //
 // Docs pages are owned by Starlight (its own layout) and are NOT wrapped here.
-// See astro-migration.mdx § "Phase 5: Astro shell and web pages".
 import "../styles.css";
 import Navbar from "../components/navbar.astro";
 import Footer from "../components/Footer.astro";
@@ -22,6 +21,8 @@ export interface Props {
   noindex?: boolean;
   ogType?: string;
   jsonLd?: object | object[];
+  /** Emit .md/.txt rel=alternate links (default true; false for the 404). */
+  alts?: boolean;
 }
 
 const {
@@ -32,12 +33,19 @@ const {
   noindex = false,
   ogType = "website",
   jsonLd,
+  alts = true,
 } = Astro.props;
 
 const SITE = "https://gpui-query.freeoxide.com";
 const canonical = new URL(canonicalPath, SITE).href;
 const ogImage = new URL(image, SITE).href;
 const jsonLdArray = jsonLd ? (Array.isArray(jsonLd) ? jsonLd : [jsonLd]) : [];
+
+// Token-light alternates: every page is also served as `.md` and `.txt` at the
+// same path (root -> /index.{md,txt}). Advertise them so crawlers/agents that
+// inspect the head can find the small copy without guessing the convention.
+const altBase = canonicalPath.replace(/\/+$/, "");
+const altHref = (ext: string) => `${altBase === "" ? "/index" : altBase}${ext}`;
 ---
 <!doctype html>
 <html lang="en">
@@ -54,6 +62,10 @@ const jsonLdArray = jsonLd ? (Array.isArray(jsonLd) ? jsonLd : [jsonLd]) : [];
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.json" />
+
+    {/* Token-light alternates (markdown + plain text) for AI agents. */}
+    {alts && <link rel="alternate" type="text/markdown" href={altHref(".md")} />}
+    {alts && <link rel="alternate" type="text/plain" href={altHref(".txt")} />}
 
     {/* OpenGraph */}
     <meta property="og:title" content={title} />

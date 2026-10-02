@@ -1,5 +1,3 @@
-//! Diagnostics, dehydrate/hydrate, and persister tests (tests 24–30).
-
 use std::sync::Mutex;
 
 use gpui::{BorrowAppContext as _, TestAppContext};
@@ -8,17 +6,13 @@ use crate::client::{DehydratedEntry, DehydratedState, QueryClient};
 use crate::core::*;
 use crate::tests::test_support::*;
 
-// -- 24. Diagnostics: query status and cache_policy accuracy -----------------
-
 #[gpui::test]
 fn test_diagnostics_query_status_accuracy(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Create idle resource
             let _idle = client.resource::<String, QueryError>("diag_idle", cx);
 
-            // Create success resource via prepared fetch
             let prepared = client
                 .prepare_fetch_query::<String, QueryError>("diag_success", cx)
                 .expect("should start");
@@ -46,8 +40,6 @@ fn test_diagnostics_query_status_accuracy(cx: &mut TestAppContext) {
     });
 }
 
-// -- 25. Diagnostics: cache_policy label correctness -------------------------
-
 #[gpui::test]
 fn test_diagnostics_cache_policy_label(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -69,28 +61,22 @@ fn test_diagnostics_cache_policy_label(cx: &mut TestAppContext) {
     });
 }
 
-// -- 26. Dehydrate includes infinite queries ---------------------------------
-
 #[gpui::test]
 fn test_dehydrate_includes_infinite_query_success(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Regular query success
             let q = client.resource::<String, QueryError>("q1", cx);
             q.update(cx, |r, _| r.apply_success("data".to_string(), 1_000));
 
-            // Infinite query (no direct apply_success, just create idle)
             let _iq = client.infinite_resource::<String, QueryError>("iq1", cx);
 
             let state = client.dehydrate(cx);
-            // Only the regular query with Success should appear
             let regular_entries: Vec<_> =
                 state.entries.iter().filter(|e| e.kind == "query").collect();
             assert_eq!(regular_entries.len(), 1);
             assert_eq!(regular_entries[0].key, "q1");
 
-            // Infinite query is idle, so not in dehydrate output
             let inf_entries: Vec<_> = state
                 .entries
                 .iter()
@@ -100,8 +86,6 @@ fn test_dehydrate_includes_infinite_query_success(cx: &mut TestAppContext) {
         });
     });
 }
-
-// -- 27. DehydratedState default and manual construction ---------------------
 
 #[gpui::test]
 fn test_dehydrated_state_default_and_construction(_cx: &mut TestAppContext) {
@@ -120,8 +104,6 @@ fn test_dehydrated_state_default_and_construction(_cx: &mut TestAppContext) {
     assert_eq!(state.entries[0].key, "users");
 }
 
-// -- 28. Hydrate is a no-op (placeholder API) --------------------------------
-
 #[gpui::test]
 fn test_hydrate_is_noop(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -134,17 +116,13 @@ fn test_hydrate_is_noop(cx: &mut TestAppContext) {
                     kind: "query",
                 }],
             };
-            // hydrate is a placeholder — should not panic
             client.hydrate(state, cx);
 
-            // No data should be injected (hydrate is a no-op)
             let data = client.get_query_data::<String, QueryError>(&QueryKey::from("test"), cx);
             assert!(data.is_none(), "hydrate is a no-op, no data injected");
         });
     });
 }
-
-// -- 29. QueryPersister: save/load round-trip with typed data ----------------
 
 #[gpui::test]
 fn test_persister_empty_restore(cx: &mut TestAppContext) {
@@ -159,7 +137,6 @@ fn test_persister_empty_restore(cx: &mut TestAppContext) {
                 fn save(&self, _entries: Vec<DehydratedEntry>) {}
             }
 
-            // No resources yet — persist should produce no entries
             client.persist(&EmptyPersister, cx);
             let loaded = QueryClient::restore(&EmptyPersister);
             assert!(loaded.is_empty());
@@ -167,20 +144,16 @@ fn test_persister_empty_restore(cx: &mut TestAppContext) {
     });
 }
 
-// -- 30. Persister records multiple success entries --------------------------
-
 #[gpui::test]
 fn test_persister_records_multiple_entries(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Create several success resources
             for i in 0..5 {
                 let key = format!("persist_{i}");
                 let e = client.resource::<String, QueryError>(key.clone(), cx);
                 e.update(cx, |r, _| r.apply_success(format!("val_{i}"), 1_000));
             }
-            // One idle resource that should NOT be persisted
             let _idle = client.resource::<String, QueryError>("idle_persist", cx);
 
             struct CapturePersister {

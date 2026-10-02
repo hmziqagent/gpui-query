@@ -1,6 +1,6 @@
 [package]
 name = "gpui-query"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "TanStack Query-inspired async state management for GPUI"
 repository = "https://github.com/freeoxide/gpui-query"
@@ -18,17 +18,48 @@ client = ["core", "dep:gpui"]
 hook = ["client"]
 persist = ["client", "hook", "dep:serde_json", "dep:thiserror"]
 
+[lib]
+bench = false
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 thiserror = { version = "2", optional = true }
-ahash = { version = "0.8" }
 gpui = { workspace = true, optional = true }
+
+# ahash's runtime-rng pulls getrandom, which hard-errors on wasm32-unknown-unknown;
+# wasm builds use compile-time RNG instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ahash = { version = "0.8" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ahash = { version = "0.8", default-features = false, features = ["std", "compile-time-rng"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 gpui = { workspace = true, features = ["test-support"] }
 proptest = "1"
+criterion = { workspace = true }
+
+[[test]]
+name = "edge_cases"
+bench = false
+
+[[bench]]
+name = "sanitize"
+harness = false
+
+[[bench]]
+name = "key_path"
+harness = false
+
+[[bench]]
+name = "request_policy"
+harness = false
+
+[[bench]]
+name = "request_id"
+harness = false
 
 [package.metadata.docs.rs]
 all-features = true

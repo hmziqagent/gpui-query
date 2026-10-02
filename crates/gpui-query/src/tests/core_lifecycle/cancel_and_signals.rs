@@ -1,14 +1,5 @@
-//! Cancellation and signal lifecycle tests (sections 7-10).
-//!
-//! Covers: cancel from LoadingEmpty/LoadingWithData, cancel no-op,
-//! signal creation, signal propagation, completion vs signal.
-
 use crate::core::*;
 use crate::tests::core_lifecycle::transitions::*;
-
-// ═══════════════════════════════════════════════════════════════════════
-// 7. Cancellation from LoadingEmpty
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn cancel_from_loading_empty() {
@@ -24,13 +15,8 @@ fn cancel_from_loading_empty() {
     assert_eq!(r.data(), None);
     assert_eq!(err_str(&r), Some("cancelled: user abort".to_string()));
     assert_eq!(r.cancelled_count(), 1);
-    // The stale rid should no longer be accepted
     assert!(r.accept_current_request(rid).is_none());
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 8. Cancellation from LoadingWithData saves previous_data
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn cancel_from_loading_with_data_saves_previous_data() {
@@ -71,10 +57,6 @@ fn rollback_to_previous_restores_data_after_cancel() {
     assert_eq!(r.previous_data(), None);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 9. Cancel without active request is a no-op
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn cancel_without_active_request_returns_false() {
     let mut r = resource();
@@ -92,16 +74,11 @@ fn cancel_after_completion_is_noop() {
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "done", 200));
 
-    // No active request anymore
     assert!(!r.cancel(QueryError::cancelled("late")));
     assert_eq!(r.status(), QueryStatus::Success);
     assert_eq!(r.data(), Some(&"done"));
     assert_eq!(r.cancelled_count(), 0);
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 10. Cancel signal lifecycle: new signal created, old signal cancelled
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn begin_request_creates_fresh_signal() {
@@ -138,7 +115,6 @@ fn new_request_cancels_old_signal() {
     let _ = r.begin_request(&mut s, 100, QueryFetchMode::Normal);
     let old_signal = r.signal().unwrap().clone();
 
-    // Second request replaces the first (LatestWins)
     let _ = r.begin_request(&mut s, 200, QueryFetchMode::Normal);
 
     assert!(
@@ -150,27 +126,6 @@ fn new_request_cancels_old_signal() {
     assert_ne!(old_signal, *new_signal, "signals must be distinct objects");
 }
 
-/// Design rationale: completing a request deliberately does NOT cancel the
-/// signal. This is a conscious design choice with three motivations:
-///
-/// 1. **Subscription hand-off**: Consumers that subscribed to the signal
-///    during the loading phase may still need to read the signal's state
-///    (e.g. to distinguish normal completion from cancellation). Cancelling
-///    on completion would conflate the two cases.
-///
-/// 2. **Refetch within the same signal**: If a refetch is triggered soon
-///    after completion (e.g. stale-while-revalidate), reusing the same
-///    signal avoids a cancel-then-recreate race window where subscribers
-///    could miss the transition.
-///
-/// 3. **What would break**: If completion cancelled the signal, any
-///    subscriber that checked `is_cancelled()` to decide whether to
-///    discard buffered data would incorrectly discard a successful result.
-///    The signal's cancellation would be ambiguous -- it could mean
-///    "aborted" or "finished successfully".
-///
-/// Only explicit `cancel()` or `reset()` cancel the signal, because those
-/// represent true interruptions where subscribers should stop work.
 #[test]
 fn completion_does_not_cancel_signal() {
     let mut r = resource();

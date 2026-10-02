@@ -9,20 +9,25 @@ dist/
 .output/
 .tanstack/
 
-# Generated docs (built from docs/ by build-docs.mjs)
-web/public/docs/
-
 # OS
 .DS_Store
 Thumbs.db
 
 .commandcode
 
+# z-workflow state
+.z-workflow/
+
+# z-proflow state
+.z-proflow/
+
+# z-flow state
+.zflow/
+
 # Local Playwright/MCP artifacts
 .playwright-mcp/
 
 .wrangler/cache
 
-.astro-migration-baseline/
-
 .astro
+.zcode/

@@ -15,24 +15,27 @@ cargo add gpui-query-persist
 gpui-query-persist = "0.1.0"
 ```
 
-The crate pulls in [gpui-query](https://crates.io/crates/gpui-query) with the `persist`, `client`, and `hook` features already enabled, plus `dirs`, `tempfile`, `bincode`, `serde`, `serde_json`, and `thiserror`.
+The crate pulls in [gpui-query](https://crates.io/crates/gpui-query) with the `persist`, `client`, and `hook` features already enabled, plus `dirs`, `tempfile`, `bincode`, `serde`, and `serde_json`.
 
 ## What it does
 
-- **Atomic write.** Each save serializes the snapshot to a sibling `NamedTempFile` (via [`tempfile`]), fsyncs it (`F_FULLFSYNC` on macOS, plain `fsync` elsewhere), then renames it over the target. On POSIX the parent directory is fsynced after the replace so the rename survives power loss.
-- **Tolerant load.** A missing file yields an empty snapshot. A corrupt or unparseable file is logged and treated as empty (no panic). A version mismatch returns `PersistError::VersionMismatch`, so callers can distinguish "corrupt" from "wrong format".
-- **No `tokio`.** Writes are serialized through a `std::sync::Mutex` and run on GPUI's `background_executor`; reads take the same lock briefly. The persister performs synchronous `std::fs` I/O, which is what the background executor is designed for.
+- Atomic write: each save serializes the snapshot to a sibling `NamedTempFile` (via [`tempfile`]), fsyncs it (`F_FULLFSYNC` on macOS, plain `fsync` elsewhere), then renames it over the target. On POSIX the parent directory is fsynced after the replace so the rename survives power loss.
+- Tolerant load: a missing file yields an empty snapshot. A corrupt or unparseable file is logged and treated as empty (no panic). A version mismatch returns `PersistError::VersionMismatch`, so callers can distinguish "corrupt" from "wrong format".
+- Locking: saves on one persister are serialized through a `std::sync::Mutex`; loads skip the lock entirely. The rename is atomic, so a load concurrent with a save always sees a complete file, old or new. The persister performs synchronous `std::fs` I/O, which is what GPUI's background executor is designed for.
 
 ## Quick start
 
 Hand a `FilePersister` to `QueryClient::persist_with` when your app starts. Keep the returned `PersistHandle` alive for as long as you want saves to continue.
 
-```rust
-use gpui::App;
+```rust,ignore
+// `ignore` on the gpui-pre bridge only: the snapshot renames
+// Application::new to with_platform, which would not read upstream.
+use gpui::Application;
+# use gpui::BorrowAppContext;
 use gpui_query::client::{PersistOptions, QueryClient};
 use gpui_query_persist::FilePersister;
 
-App::new().run(|cx| {
+Application::new().run(|cx| {
     cx.set_global(QueryClient::new());
 
     // JSON at an explicit path:
@@ -49,7 +52,10 @@ App::new().run(|cx| {
 
 ### Constructors
 
-```rust
+```rust,no_run
+# use gpui_query_persist::{FilePersister, PersistFormat};
+# use gpui_query::client::PersistError;
+# fn doc() -> Result<(), PersistError> {
 // Pick a format explicitly:
 FilePersister::new("path/to/cache.bin", PersistFormat::Bincode);
 
@@ -62,6 +68,8 @@ FilePersister::in_cache_dir("my-app")?; // -> Result<Self, PersistError>
 
 // Inspect the on-disk path:
 FilePersister::json("path/to/cache.json").path(); // -> &Path
+#     Ok(())
+# }
 ```
 
 `PersistFormat` is `Json` (human-readable, the default for `in_cache_dir`) or `Bincode` (compact, not human-readable). `NoopPersister` is re-exported for tests or disabled modes.

@@ -1,10 +1,8 @@
-//! Integration tests for the value-carrying persistence layer (`persist`
-//! feature): `persist_with` debounce/coalescing, the typed serializer/deserializer
-//! registries, `hydrate` round-trip, the [`CacheMutation`] dirty signal firing
-//! on `set_query_data`, and `PersistFilter` / `max_age` behavior.
-
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use gpui::{AppContext as _, BorrowAppContext as _, Entity, TestAppContext};
@@ -14,19 +12,14 @@ use crate::client::{
     PersistSnapshot, PersistedEntry, Persister, QueryClient, hydrate,
 };
 use crate::core::{
-    InfiniteQueryResource, MutationResource, QueryError, QueryKey, QueryResource, QueryStatus,
+    InfiniteQueryResource, MutationResource, QueryError, QueryKey, QueryKeyFilter, QueryResource,
+    QueryStatus,
 };
 use crate::hook::{
     InfiniteQueryOptions, fetch_query, mutate, use_infinite_query, use_mutation, use_query_manual,
 };
 use crate::tests::test_support::*;
 
-/// An in-memory persister that stores the last saved snapshot, for asserting
-/// on the value-carrying payload in tests.
-///
-/// `save_count` tracks the number of `save` invocations so coalescing tests
-/// can assert exactly how many saves actually fired (additive: existing tests
-/// that ignore it are unaffected).
 #[derive(Default, Clone)]
 struct MemPersister {
     last_saved: Arc<StdMutex<Option<PersistSnapshot>>>,
@@ -54,19 +47,29 @@ impl Persister for MemPersister {
     }
 }
 
+fn ser_string(s: &String) -> serde_json::Value {
+    serde_json::to_value(s).expect("serialize")
+}
+
+fn zero_debounce() -> PersistOptions {
+    PersistOptions {
+        debounce: Duration::ZERO,
+        ..PersistOptions::default()
+    }
+}
+
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[gpui::test]
 fn test_set_query_data_bumps_cache_mutation(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
-        // Install persist_with so the CacheMutation observation is live; the
-        // bump must not panic.
         let _handle = cx.update_global::<QueryClient, _>(|client, cx| {
             client.persist_with(NoopPersister, PersistOptions::default(), cx)
         });
         cx.update_global::<QueryClient, _>(|client, cx| {
             client.set_query_data::<String, QueryError>("k1", "v1".to_string(), cx);
         });
-        // The marker global now exists.
         assert!(cx.has_global::<CacheMutation>());
     });
 }
@@ -76,20 +79,14 @@ fn test_collect_persist_snapshot_uses_registered_serializer(cx: &mut TestAppCont
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
+            client.register_serializer::<String, QueryError>(ser_string);
 
             let e = client.resource::<String, QueryError>(QueryKey::from("snap_k"), cx);
             e.update(cx, |r, _| {
                 r.apply_success("payload".to_string(), crate::client::current_time_ms())
             });
 
-            let snap = client.collect_persist_snapshot(
-                &PersistFilter::All,
-                Duration::from_secs(60 * 60 * 24),
-                cx,
-            );
+            let snap = client.collect_persist_snapshot(&PersistFilter::All, DAY, cx);
             assert_eq!(snap.entries.len(), 1);
             let entry = snap.entries.get("snap_k").expect("entry present");
             assert_eq!(entry.value, serde_json::json!("payload"));
@@ -102,7 +99,6 @@ fn test_collect_persist_snapshot_skips_unregistered_types(cx: &mut TestAppContex
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // NO serializer registered → entry skipped (metadata-only fallback).
             let e = client.resource::<String, QueryError>(QueryKey::from("unreg"), cx);
             e.update(cx, |r, _| {
                 r.apply_success("data".to_string(), crate::client::current_time_ms())
@@ -112,7 +108,7 @@ fn test_collect_persist_snapshot_skips_unregistered_types(cx: &mut TestAppContex
                 client.collect_persist_snapshot(&PersistFilter::All, Duration::from_secs(3600), cx);
             assert!(
                 snap.entries.is_empty(),
-                "unregistered type → no value-carrying entry"
+                "unregistered type -> no value-carrying entry"
             );
         });
     });
@@ -123,22 +119,17 @@ fn test_collect_persist_snapshot_filter_and_max_age(cx: &mut TestAppContext) {
     setup_query_client(cx);
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
+            client.register_serializer::<String, QueryError>(ser_string);
             let now = crate::client::current_time_ms();
-            // Two recent entries under the "users" prefix.
             for parts in [["users", "1"], ["users", "2"]] {
                 let e = client.resource::<String, QueryError>(QueryKey::from(parts), cx);
                 e.update(cx, |r, _| r.apply_success("v".to_string(), now));
             }
-            // One OLD entry (≈2.7 h in the past) under "posts".
             let e = client.resource::<String, QueryError>(QueryKey::from(["posts", "9"]), cx);
             e.update(cx, |r, _| {
                 r.apply_success("old".to_string(), now.saturating_sub(10_000_000))
             });
 
-            // Prefix "users" → exactly the two users entries.
             let snap = client.collect_persist_snapshot(
                 &PersistFilter::Prefix(QueryKey::from(["users"])),
                 Duration::from_secs(3600),
@@ -146,9 +137,6 @@ fn test_collect_persist_snapshot_filter_and_max_age(cx: &mut TestAppContext) {
             );
             assert_eq!(snap.entries.len(), 2);
 
-            // All + 1 s max_age → the old "posts::9" entry is filtered out; the
-            // two recent users entries (age ~0) survive. (max_age = 0 means
-            // *disabled*, not "all too old", so a positive small max_age is used.)
             let snap_all =
                 client.collect_persist_snapshot(&PersistFilter::All, Duration::from_secs(1), cx);
             assert_eq!(snap_all.entries.len(), 2);
@@ -163,32 +151,14 @@ fn test_persist_with_saves_on_mutation(cx: &mut TestAppContext) {
     let persister = MemPersister::default();
     let captured = persister.last_saved.clone();
 
-    // The bucket stores only `WeakEntity`, so a Success entry must be held by a
-    // live owner or it is dropped before the (async) observer callback collects
-    // the snapshot. The harness holds it for the life of the test, mirroring a
-    // real component holding the `Entity` from `use_query`.
     struct H {
         _entity: Entity<QueryResource<String, QueryError>>,
         _handle: PersistHandle,
     }
     let harness = cx.new(|cx| {
         let (_handle, entity) = cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
-            let handle = client.persist_with(
-                persister.clone(),
-                // Zero debounce: the TestAppContext mock clock does not advance
-                // wall-clock timers, so a non-zero debounce would never let the
-                // save fire here. The debounce *logic* (the `is_zero`
-                // short-circuit) is still exercised; a real app uses a non-zero
-                // debounce.
-                PersistOptions {
-                    debounce: Duration::ZERO,
-                    ..PersistOptions::default()
-                },
-                cx,
-            );
+            client.register_serializer::<String, QueryError>(ser_string);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
             let entity = client.resource::<String, QueryError>(QueryKey::from("persisted"), cx);
             entity.update(cx, |r, _| {
                 r.apply_success("data".to_string(), crate::client::current_time_ms())
@@ -201,8 +171,6 @@ fn test_persist_with_saves_on_mutation(cx: &mut TestAppContext) {
         }
     });
 
-    // A mutation (on another key) bumps the dirty signal → persist_with collects
-    // the live cache (including the retained Success entry) and saves.
     cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
             client.set_query_data::<String, QueryError>("trigger", "x".to_string(), cx);
@@ -228,7 +196,6 @@ fn test_hydrate_primes_via_deserializer_registry(cx: &mut TestAppContext) {
     setup_query_client(cx);
     let persister = MemPersister::default();
 
-    // Pre-load a snapshot with one entry whose value is a JSON string.
     let mut snap = PersistSnapshot {
         entries: Default::default(),
         version: crate::client::PERSIST_VERSION,
@@ -244,9 +211,6 @@ fn test_hydrate_primes_via_deserializer_registry(cx: &mut TestAppContext) {
     );
     *persister.load_value.lock().unwrap() = Some(snap);
 
-    // The bucket stores only `WeakEntity`, so hold the "hydrate_k" entity from a
-    // harness; hydrate's `set_query_data` then reuses the retained entity rather
-    // than creating one that is immediately dropped.
     struct H {
         _entity: Entity<QueryResource<String, QueryError>>,
     }
@@ -261,15 +225,10 @@ fn test_hydrate_primes_via_deserializer_registry(cx: &mut TestAppContext) {
         H { _entity: entity }
     });
 
-    // Run the async hydrate on the background executor, then assert priming.
     let filter = PersistFilter::All;
-    let max_age = Duration::from_secs(60 * 60 * 24);
+    let max_age = DAY;
     let outcome = cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
-            // Drive hydrate synchronously inside the global lease: it is an
-            // async fn whose future is immediately Ready (the MemPersister's
-            // load is a clone, no real await).
-            // We cannot `.await` here, so block on it via a tiny executor.
             block_on_ready(hydrate(client, &persister, &filter, max_age, cx))
         })
     });
@@ -295,10 +254,97 @@ fn test_hydrate_primes_via_deserializer_registry(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_hydrate_rebuilds_multi_segment_keys(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+
+    let mut snap = PersistSnapshot {
+        entries: Default::default(),
+        version: crate::client::PERSIST_VERSION,
+    };
+    snap.entries.insert(
+        "users::42::posts".to_string(),
+        PersistedEntry {
+            value: serde_json::json!("post-data"),
+            cached_at: crate::client::current_time_ms(),
+            cache_policy: crate::core::CachePolicy::default(),
+            meta: None,
+        },
+    );
+    *persister.load_value.lock().unwrap() = Some(snap);
+
+    struct H {
+        _entity: Entity<QueryResource<String, QueryError>>,
+    }
+    let harness = cx.new(|cx| {
+        cx.update_global::<QueryClient, _>(|client, _cx| {
+            client
+                .register_deserializer::<String, QueryError>(|v| v.as_str().map(|s| s.to_string()));
+        });
+        let entity = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.resource::<String, QueryError>(QueryKey::from(["users", "42", "posts"]), cx)
+        });
+        H { _entity: entity }
+    });
+
+    let key = QueryKey::from(["users", "42", "posts"]);
+    let prefix = PersistFilter::Prefix(QueryKey::from(["users"]));
+    let outcome = cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            block_on_ready(hydrate(client, &persister, &prefix, DAY, cx))
+        })
+    });
+    assert!(
+        outcome.is_ok(),
+        "hydrate should succeed: {:?}",
+        outcome.err()
+    );
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            let data = client.get_query_data::<String, QueryError>(&key, cx);
+            assert_eq!(
+                data,
+                Some("post-data".to_string()),
+                "Prefix must match the reconstructed segments"
+            );
+        });
+    });
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.set_query_data::<String, QueryError>(key.clone(), "sentinel".to_string(), cx);
+        });
+    });
+    let exact = PersistFilter::Exact(key.clone());
+    let outcome = cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            block_on_ready(hydrate(client, &persister, &exact, DAY, cx))
+        })
+    });
+    assert!(
+        outcome.is_ok(),
+        "hydrate should succeed: {:?}",
+        outcome.err()
+    );
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            let data = client.get_query_data::<String, QueryError>(&key, cx);
+            assert_eq!(
+                data,
+                Some("post-data".to_string()),
+                "Exact must match the reconstructed segments"
+            );
+        });
+    });
+    let _ = harness;
+}
+
+#[gpui::test]
 fn test_hydrate_rejects_version_mismatch(cx: &mut TestAppContext) {
     setup_query_client(cx);
     let persister = MemPersister::default();
-    // A snapshot with a bogus version.
     *persister.load_value.lock().unwrap() = Some(PersistSnapshot {
         entries: Default::default(),
         version: 9999,
@@ -312,7 +358,7 @@ fn test_hydrate_rejects_version_mismatch(cx: &mut TestAppContext) {
     });
 
     let filter = PersistFilter::All;
-    let max_age = Duration::from_secs(60 * 60 * 24);
+    let max_age = DAY;
     let outcome = cx.update(|cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
             block_on_ready(hydrate(client, &persister, &filter, max_age, cx))
@@ -328,14 +374,100 @@ fn test_hydrate_rejects_version_mismatch(cx: &mut TestAppContext) {
     }
 }
 
-// ── H1: a REAL FETCH COMPLETION drives persist_with ──────────────────────
-//
-// The marquee Core-Change-2 behavior: when a query transitions to
-// `QueryStatus::Success` through the real hook fetch path (not via
-// `set_query_data`), the `CacheMutation` dirty signal is bumped inside
-// `run_query_retry_loop`, which the `persist_with` observer collects and saves.
-// This was previously untested — every other test in this file primes the
-// cache via `set_query_data` or `apply_success` directly.
+#[gpui::test]
+fn test_hydrate_hostile_entries_skip_without_panicking(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+
+    let now = crate::client::current_time_ms();
+    let mut snap = PersistSnapshot {
+        entries: Default::default(),
+        version: crate::client::PERSIST_VERSION,
+    };
+    snap.entries.insert(
+        "hostile_shape".to_string(),
+        PersistedEntry {
+            value: serde_json::json!({"evil": [1, null, "x"]}),
+            cached_at: now,
+            cache_policy: crate::core::CachePolicy::default(),
+            meta: None,
+        },
+    );
+    snap.entries.insert(
+        "future_cached_at".to_string(),
+        PersistedEntry {
+            value: serde_json::json!("future"),
+            cached_at: u64::MAX,
+            cache_policy: crate::core::CachePolicy::default(),
+            meta: None,
+        },
+    );
+    snap.entries.insert(
+        "ancient_cached_at".to_string(),
+        PersistedEntry {
+            value: serde_json::json!("ancient"),
+            cached_at: 0,
+            cache_policy: crate::core::CachePolicy::default(),
+            meta: None,
+        },
+    );
+    *persister.load_value.lock().unwrap() = Some(snap);
+
+    struct H {
+        hostile: Entity<QueryResource<String, QueryError>>,
+        future: Entity<QueryResource<String, QueryError>>,
+        ancient: Entity<QueryResource<String, QueryError>>,
+    }
+    let harness = cx.new(|cx| {
+        cx.update_global::<QueryClient, _>(|client, _cx| {
+            client
+                .register_deserializer::<String, QueryError>(|v| v.as_str().map(|s| s.to_string()));
+        });
+        let hostile = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.resource::<String, QueryError>(QueryKey::from("hostile_shape"), cx)
+        });
+        let future = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.resource::<String, QueryError>(QueryKey::from("future_cached_at"), cx)
+        });
+        let ancient = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.resource::<String, QueryError>(QueryKey::from("ancient_cached_at"), cx)
+        });
+        H {
+            hostile,
+            future,
+            ancient,
+        }
+    });
+
+    let outcome = cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            block_on_ready(hydrate(
+                client,
+                &persister,
+                &PersistFilter::All,
+                Duration::from_secs(60),
+                cx,
+            ))
+        })
+    });
+    assert!(outcome.is_ok(), "hostile entries must not fail hydrate");
+
+    cx.update(|cx| {
+        assert!(
+            harness.read(cx).hostile.read(cx).data().is_none(),
+            "a value with a hostile JSON shape must be skipped, not primed or panicked on"
+        );
+        assert!(
+            harness.read(cx).ancient.read(cx).data().is_none(),
+            "an entry older than max_age must be filtered out"
+        );
+        assert_eq!(
+            harness.read(cx).future.read(cx).data(),
+            Some(&"future".to_string()),
+            "u64::MAX cached_at must saturate to age 0 and stay hydratable"
+        );
+    });
+}
 
 #[gpui::test]
 fn test_persist_with_driven_by_real_fetch_completion(cx: &mut TestAppContext) {
@@ -343,40 +475,15 @@ fn test_persist_with_driven_by_real_fetch_completion(cx: &mut TestAppContext) {
     let persister = MemPersister::default();
     let captured = persister.last_saved.clone();
 
-    // The bucket stores only `WeakEntity`, so a Success entry must be held by a
-    // live owner or it is dropped before the (async) observer collects the
-    // snapshot. The harness holds the `use_query_manual` entity for the life of
-    // the test, mirroring a real component holding the `Entity` from
-    // `use_query`.
     struct H {
         entity: Entity<QueryResource<String, QueryError>>,
         _handle: PersistHandle,
     }
     let harness = cx.new(|cx| {
-        // Global-layer setup: register the serializer and install the
-        // `persist_with` driver. `cx` here is `&mut Context<H>`, which derefs
-        // to `&mut App` for `update_global`.
         let _handle = cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
-            client.persist_with(
-                persister.clone(),
-                // Zero debounce: the save task runs immediately once the fetch
-                // resolves and bumps `CacheMutation`. (See
-                // `test_persist_with_debounce_coalesces` for the non-zero
-                // debounce / mock-clock path.)
-                PersistOptions {
-                    debounce: Duration::ZERO,
-                    ..PersistOptions::default()
-                },
-                cx,
-            )
+            client.register_serializer::<String, QueryError>(ser_string);
+            client.persist_with(persister.clone(), zero_debounce(), cx)
         });
-        // Create the resource via the REAL hook path so the bucket owns a
-        // `WeakEntity` keyed under "fetched". `use_query_manual` requires an
-        // entity `Context`, so it must run in the `cx.new` body (not inside
-        // `update_global`, where only `&mut App` is available).
         let (entity, _sub) = use_query_manual::<String, QueryError, _>(
             QueryKey::from("fetched"),
             crate::core::CachePolicy::NoCache,
@@ -386,10 +493,6 @@ fn test_persist_with_driven_by_real_fetch_completion(cx: &mut TestAppContext) {
         H { entity, _handle }
     });
 
-    // Drive a REAL fetch to completion through the hook layer. The fetcher
-    // resolves with a concrete value; on success the retry loop calls
-    // `complete_success` and bumps `CacheMutation`, waking the `persist_with`
-    // observer.
     harness.update(cx, |this, cx| {
         fetch_query(
             &this.entity,
@@ -397,13 +500,8 @@ fn test_persist_with_driven_by_real_fetch_completion(cx: &mut TestAppContext) {
             cx,
         );
     });
-
-    // Pump the executor: the fetch future resolves, the success path bumps the
-    // dirty signal, the observer collects a fresh snapshot, and (with ZERO
-    // debounce) the spawned save task runs immediately.
     cx.run_until_parked();
 
-    // Confirm the fetch really did complete (the trigger is NOT set_query_data).
     cx.update(|cx| {
         let resource = harness.read(cx).entity.read(cx);
         assert_eq!(
@@ -419,8 +517,6 @@ fn test_persist_with_driven_by_real_fetch_completion(cx: &mut TestAppContext) {
         .unwrap()
         .clone()
         .expect("persist_with should have saved after the real fetch completed");
-    // The fetched entry's key and value must round-trip into the snapshot via
-    // the registered serializer.
     let entry = saved
         .entries
         .get("fetched")
@@ -433,16 +529,6 @@ fn test_persist_with_driven_by_real_fetch_completion(cx: &mut TestAppContext) {
     let _ = harness;
 }
 
-// ── H2: a REAL MUTATION completion drives persist_with ────────────────────
-//
-// Mirrors `test_persist_with_driven_by_real_fetch_completion` for the mutation
-// family. Mutations are not themselves persisted (mutation buckets are not
-// collected into the snapshot), but a `use_mutation` resolve bumps
-// `CacheMutation` inside `run_mutation_loop_inner`, so a retained Success query
-// entry IS saved. This catches a regression that dropped the mutation-completion
-// bump — previously the only "mutation" test triggered via `set_query_data` on
-// a sibling key, so the real mutate() path was exercised only by compilation.
-
 #[gpui::test]
 fn test_persist_with_driven_by_real_mutation_completion(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -450,28 +536,15 @@ fn test_persist_with_driven_by_real_mutation_completion(cx: &mut TestAppContext)
     let captured = persister.last_saved.clone();
 
     struct H {
-        // A retained Success query entry — the thing actually persisted.
         _query: Entity<QueryResource<String, QueryError>>,
-        // The mutation entity; completing it bumps the dirty signal.
         mutation: Entity<MutationResource<String, String, QueryError>>,
         _handle: PersistHandle,
     }
     let harness = cx.new(|cx| {
         let _handle = cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
-            client.persist_with(
-                persister.clone(),
-                PersistOptions {
-                    debounce: Duration::ZERO,
-                    ..PersistOptions::default()
-                },
-                cx,
-            )
+            client.register_serializer::<String, QueryError>(ser_string);
+            client.persist_with(persister.clone(), zero_debounce(), cx)
         });
-        // Prime a retained Success query entry. `apply_success` does NOT bump
-        // `CacheMutation`, so no save fires from this priming.
         let query = cx.update_global::<QueryClient, _>(|client, cx| {
             let e = client.resource::<String, QueryError>(QueryKey::from("retained"), cx);
             e.update(cx, |r, _| {
@@ -479,7 +552,6 @@ fn test_persist_with_driven_by_real_mutation_completion(cx: &mut TestAppContext)
             });
             e
         });
-        // Create the mutation via the REAL hook path.
         let (mutation, _msub) = use_mutation::<String, String, QueryError, _>((), cx);
         H {
             _query: query,
@@ -488,9 +560,6 @@ fn test_persist_with_driven_by_real_mutation_completion(cx: &mut TestAppContext)
         }
     });
 
-    // Drive a REAL mutation to success. The resolving fetcher hits
-    // `run_mutation_loop_inner`'s success arm, which bumps `CacheMutation`,
-    // waking `persist_with` to collect (and save) the retained Success entry.
     harness.update(cx, |this, cx| {
         mutate(
             &this.mutation,
@@ -501,7 +570,6 @@ fn test_persist_with_driven_by_real_mutation_completion(cx: &mut TestAppContext)
     });
     cx.run_until_parked();
 
-    // Confirm the mutation really did complete (the trigger is NOT set_query_data).
     cx.update(|cx| {
         let m = harness.read(cx).mutation.read(cx);
         assert_eq!(
@@ -524,14 +592,6 @@ fn test_persist_with_driven_by_real_mutation_completion(cx: &mut TestAppContext)
     let _ = harness;
 }
 
-// ── H3: a REAL INFINITE first-page completion drives persist_with ──────────
-//
-// Mirrors the query marquee for the infinite family. Creating an infinite query
-// via `use_infinite_query` auto-fetches the first page; when it resolves, the
-// success arm in `run_fetch_next_page_with_id` bumps `CacheMutation`. Infinite
-// buckets ARE collected into the snapshot (first page only), so the page is
-// saved. This catches a regression that dropped the infinite-completion bump.
-
 #[gpui::test]
 fn test_persist_with_driven_by_real_infinite_completion(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -544,22 +604,11 @@ fn test_persist_with_driven_by_real_infinite_completion(cx: &mut TestAppContext)
     }
     let harness = cx.new(|cx| {
         let _handle = cx.update_global::<QueryClient, _>(|client, cx| {
-            // The infinite page type is `Vec<String>`; register a serializer
-            // keyed on that `T` so `collect_persistable_into` emits the page.
             client.register_serializer::<Vec<String>, QueryError>(|v| {
                 serde_json::to_value(v).expect("serialize")
             });
-            client.persist_with(
-                persister.clone(),
-                PersistOptions {
-                    debounce: Duration::ZERO,
-                    ..PersistOptions::default()
-                },
-                cx,
-            )
+            client.persist_with(persister.clone(), zero_debounce(), cx)
         });
-        // Create the infinite query via the REAL hook path; the first-page fetch
-        // starts immediately and resolves on `run_until_parked`.
         let (infinite, _isub) = use_infinite_query(
             InfiniteQueryOptions::new("infinite-feed")
                 .cache_policy(crate::core::CachePolicy::Ttl { ttl_ms: 0 }),
@@ -569,11 +618,8 @@ fn test_persist_with_driven_by_real_infinite_completion(cx: &mut TestAppContext)
         H { infinite, _handle }
     });
 
-    // Let the first-page fetch resolve → bumps `CacheMutation` → `persist_with`
-    // collects the infinite first page and saves.
     cx.run_until_parked();
 
-    // Confirm the infinite query really did fetch (the trigger is NOT set_query_data).
     cx.update(|cx| {
         let r = harness.read(cx).infinite.read(cx);
         assert_eq!(
@@ -600,14 +646,6 @@ fn test_persist_with_driven_by_real_infinite_completion(cx: &mut TestAppContext)
     let _ = harness;
 }
 
-// ── H4: an IMPERATIVE PreparedFetch completion drives persist_with ─────────
-//
-// Guards the C1 fix: `PreparedFetch::complete_success` now bumps `CacheMutation`
-// (gated on `persist`), so the imperative escape-hatch (`prepare_fetch_query`,
-// the TanStack `queryClient.fetchQuery()` equivalent) is no longer invisible to
-// `persist_with`. Without the bump, a resolved imperative fetch was silently
-// never saved — the hook-layer completions all bumped, but this path did not.
-
 #[gpui::test]
 fn test_persist_with_driven_by_imperative_prepared_fetch(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -620,21 +658,9 @@ fn test_persist_with_driven_by_imperative_prepared_fetch(cx: &mut TestAppContext
     }
     let harness = cx.new(|cx| {
         let _handle = cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
-            client.persist_with(
-                persister.clone(),
-                PersistOptions {
-                    debounce: Duration::ZERO,
-                    ..PersistOptions::default()
-                },
-                cx,
-            )
+            client.register_serializer::<String, QueryError>(ser_string);
+            client.persist_with(persister.clone(), zero_debounce(), cx)
         });
-        // Create + RETAIN the query resource via the REAL hook path so the
-        // bucket's WeakEntity stays alive until the observer collects it.
-        // (`prepare_fetch_query` reuses this same entity via `resource()`.)
         let (query, _qsub) = use_query_manual::<String, QueryError, _>(
             QueryKey::from("imperative"),
             crate::core::CachePolicy::NoCache,
@@ -644,9 +670,6 @@ fn test_persist_with_driven_by_imperative_prepared_fetch(cx: &mut TestAppContext
         H { query, _handle }
     });
 
-    // Start a request imperatively and complete it with success. The C1 fix
-    // bumps `CacheMutation` inside `PreparedFetch::complete_success`, waking
-    // `persist_with` to collect + save the now-Success entry.
     harness.update(cx, |_this, cx| {
         cx.update_global::<QueryClient, _>(|client, cx| {
             let prepared = client
@@ -683,17 +706,6 @@ fn test_persist_with_driven_by_imperative_prepared_fetch(cx: &mut TestAppContext
     let _ = harness;
 }
 
-// ── L12: debounce COALESCING with a NON-zero debounce ────────────────────
-//
-// `TestAppContext::run_until_parked` drives the executor with `tick(false)`,
-// which only fires delayed tasks whose deadline has already passed — it does
-// NOT advance the mock wall-clock. However the background executor exposes
-// `advance_clock(duration)` (gpui `test-support`), which advances the test
-// dispatcher's clock AND matures any due timers. So a non-zero debounce CAN be
-// exercised deterministically: fire several rapid mutations, let the bumps
-// propagate and stash the latest snapshot, advance the clock past the debounce
-// window, then assert EXACTLY ONE save fired containing the latest value.
-
 #[gpui::test]
 fn test_persist_with_debounce_coalesces(cx: &mut TestAppContext) {
     setup_query_client(cx);
@@ -703,17 +715,13 @@ fn test_persist_with_debounce_coalesces(cx: &mut TestAppContext) {
 
     let debounce = Duration::from_millis(50);
 
-    // Hold a live Success entry on the "coalesced" key so the snapshot actually
-    // contains something to save (the bucket stores only WeakEntity).
     struct H {
         _entity: Entity<QueryResource<String, QueryError>>,
         _handle: PersistHandle,
     }
     let harness = cx.new(|cx| {
         let (_handle, entity) = cx.update_global::<QueryClient, _>(|client, cx| {
-            client.register_serializer::<String, QueryError>(|s| {
-                serde_json::to_value(s).expect("serialize")
-            });
+            client.register_serializer::<String, QueryError>(ser_string);
             let handle = client.persist_with(
                 persister.clone(),
                 PersistOptions {
@@ -734,12 +742,6 @@ fn test_persist_with_debounce_coalesces(cx: &mut TestAppContext) {
         }
     });
 
-    // Fire N>=3 rapid mutations on the same driver key. Each is issued in its
-    // OWN `cx.update` so each bump delivers a separate `observe_global`
-    // notification (GPUI coalesces notifications within a single update),
-    // spawning a fresh debounced save task. All of these tasks share the single
-    // `pending` slot, so only the latest snapshot can ever be saved, and only
-    // one task drains the slot per debounce window.
     for i in 0..5_u32 {
         cx.update(|cx| {
             cx.update_global::<QueryClient, _>(|client, cx| {
@@ -747,20 +749,13 @@ fn test_persist_with_debounce_coalesces(cx: &mut TestAppContext) {
             });
         });
     }
-    // Let the bumps propagate and stash the latest snapshot; the debounced save
-    // tasks are now parked on their (un-matured) timers.
     cx.run_until_parked();
-    // Nothing saved yet — the debounce window has not elapsed.
     assert_eq!(
         *save_count.lock().unwrap(),
         0,
         "no save should fire before the debounce window elapses"
     );
 
-    // Advance the mock clock past the debounce window. `advance_clock` matures
-    // the pending timer tasks; a subsequent `run_until_parked` lets exactly one
-    // of them drain the shared slot and run `save`. The remaining tasks wake to
-    // find the slot already empty and no-op.
     cx.background_executor
         .advance_clock(debounce + Duration::from_millis(1));
     cx.run_until_parked();
@@ -775,10 +770,6 @@ fn test_persist_with_debounce_coalesces(cx: &mut TestAppContext) {
         .unwrap()
         .clone()
         .expect("the single coalesced save should have produced a snapshot");
-    // The "trigger" entities are not retained (created and dropped inside each
-    // `set_query_data`), so they do not appear in the snapshot — only the
-    // harness-retained "coalesced" Success entry survives. The point of this
-    // assertion is that the single coalesced save captured the live cache.
     assert!(
         saved.entries.contains_key("coalesced"),
         "the coalesced save should include the retained Success entry: {:?}",
@@ -787,8 +778,138 @@ fn test_persist_with_debounce_coalesces(cx: &mut TestAppContext) {
     let _ = harness;
 }
 
-// Poll a future that is always immediately Ready (the MemPersister's load is a
-// plain clone, no real async work) without pulling in an executor crate.
+#[derive(Clone, Default)]
+struct FlushGate {
+    inner: Arc<StdMutex<FlushGateInner>>,
+}
+
+#[derive(Default)]
+struct FlushGateInner {
+    released: bool,
+    wakers: Vec<Waker>,
+}
+
+impl FlushGate {
+    fn release(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.released = true;
+        for waker in inner.wakers.drain(..) {
+            waker.wake();
+        }
+    }
+
+    fn wait(&self) -> impl Future<Output = ()> + Send {
+        let inner = self.inner.clone();
+        async move {
+            std::future::poll_fn(move |cx| {
+                let mut guard = inner.lock().unwrap();
+                if guard.released {
+                    return Poll::Ready(());
+                }
+                if !guard.wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                    guard.wakers.push(cx.waker().clone());
+                }
+                Poll::Pending
+            })
+            .await
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GatedPersister {
+    gate: FlushGate,
+    events: Arc<StdMutex<Vec<String>>>,
+}
+
+impl Persister for GatedPersister {
+    async fn load(&self) -> Result<PersistSnapshot, PersistError> {
+        Ok(PersistSnapshot::new())
+    }
+
+    async fn save(&self, snapshot: &PersistSnapshot) -> Result<(), PersistError> {
+        let value = snapshot
+            .entries
+            .get("gated")
+            .and_then(|e| e.value.as_str())
+            .unwrap_or("?")
+            .to_string();
+        self.events.lock().unwrap().push(format!("start:{value}"));
+        self.gate.wait().await;
+        self.events.lock().unwrap().push(format!("end:{value}"));
+        Ok(())
+    }
+}
+
+#[gpui::test]
+fn flush_while_save_in_flight_queues_and_saves_in_order(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let gate = FlushGate::default();
+    let persister = GatedPersister {
+        gate: gate.clone(),
+        events: Arc::new(StdMutex::new(Vec::new())),
+    };
+    let events = persister.events.clone();
+
+    struct H {
+        _entity: Entity<QueryResource<String, QueryError>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (handle, entity) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            let handle = client.persist_with(persister, zero_debounce(), cx);
+            let entity = client.resource::<String, QueryError>(QueryKey::from("gated"), cx);
+            (handle, entity)
+        });
+        H {
+            _entity: entity,
+            _handle: handle,
+        }
+    });
+
+    cx.update(|cx| {
+        let entity = harness.read_with(cx, |h, _| h._entity.clone());
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            entity.update(cx, |r, _| {
+                r.apply_success("v1".to_string(), crate::client::current_time_ms())
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["start:v1"],
+        "the first save must be started and blocked on the gate"
+    );
+
+    cx.update(|cx| {
+        let entity = harness.read_with(cx, |h, _| h._entity.clone());
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            entity.update(cx, |r, _| {
+                r.apply_success("v2".to_string(), crate::client::current_time_ms())
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["start:v1"],
+        "a flush while a save is in flight must queue, not start a second save"
+    );
+
+    gate.release();
+    cx.run_until_parked();
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["start:v1", "end:v1", "start:v2", "end:v2"],
+        "the queued flush must save the newer snapshot after the in-flight save completes"
+    );
+    let _ = harness;
+}
+
 fn block_on_ready<R>(fut: impl std::future::Future<Output = R>) -> R {
     use std::future::Future;
     use std::pin::Pin;
@@ -796,7 +917,6 @@ fn block_on_ready<R>(fut: impl std::future::Future<Output = R>) -> R {
 
     let mut cx = Context::from_waker(Waker::noop());
     let mut fut = Box::pin(fut);
-    // SAFETY: pinned on the heap; we hold the only reference.
     let mut pinned: Pin<&mut dyn Future<Output = R>> = Pin::as_mut(&mut fut);
     loop {
         match pinned.as_mut().poll(&mut cx) {
@@ -804,4 +924,670 @@ fn block_on_ready<R>(fut: impl std::future::Future<Output = R>) -> R {
             Poll::Pending => std::hint::spin_loop(),
         }
     }
+}
+
+#[gpui::test]
+fn hydrate_primed_value_reaches_mounted_use_query_observer(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+
+    let mut snap = PersistSnapshot {
+        entries: Default::default(),
+        version: crate::client::PERSIST_VERSION,
+    };
+    snap.entries.insert(
+        "hydrate-notify".to_string(),
+        PersistedEntry {
+            value: serde_json::json!("hydrated"),
+            cached_at: crate::client::current_time_ms(),
+            cache_policy: crate::core::CachePolicy::default(),
+            meta: None,
+        },
+    );
+    *persister.load_value.lock().unwrap() = Some(snap);
+
+    struct H {
+        _entity: Entity<QueryResource<String, QueryError>>,
+        _sub: gpui::Subscription,
+    }
+    let harness = cx.new(|cx| {
+        cx.update_global::<QueryClient, _>(|client, _cx| {
+            client
+                .register_deserializer::<String, QueryError>(|v| v.as_str().map(|s| s.to_string()));
+        });
+        let (entity, sub) = use_query_manual::<String, QueryError, _>(
+            QueryKey::from("hydrate-notify"),
+            crate::core::CachePolicy::NoCache,
+            crate::core::RequestPolicy::LatestWins,
+            cx,
+        );
+        H {
+            _entity: entity,
+            _sub: sub,
+        }
+    });
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_for_observer = hits.clone();
+    let _notified = harness.update(cx, |_, cx| {
+        cx.observe_self(move |_, _| {
+            hits_for_observer.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+
+    let outcome = cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            block_on_ready(hydrate(client, &persister, &PersistFilter::All, DAY, cx))
+        })
+    });
+    assert!(
+        outcome.is_ok(),
+        "hydrate should succeed: {:?}",
+        outcome.err()
+    );
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            let data =
+                client.get_query_data::<String, QueryError>(&QueryKey::from("hydrate-notify"), cx);
+            assert_eq!(
+                data,
+                Some("hydrated".to_string()),
+                "hydrate should have primed the value"
+            );
+        });
+    });
+    assert!(
+        hits.load(Ordering::SeqCst) >= 1,
+        "hydrate priming via set_query_data must re-render a mounted use_query consumer"
+    );
+}
+
+#[gpui::test]
+fn flush_serializes_only_dirty_entries(cx: &mut TestAppContext) {
+    static SERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counting_serialize(value: &String) -> serde_json::Value {
+        SERIALIZATIONS.fetch_add(1, Ordering::SeqCst);
+        serde_json::to_value(value).expect("serialize")
+    }
+
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let captured = persister.last_saved.clone();
+
+    struct H {
+        dirty_a: Entity<QueryResource<String, QueryError>>,
+        dirty_b: Entity<QueryResource<String, QueryError>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (handle, dirty_a, dirty_b) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(counting_serialize);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
+            let dirty_a = client.resource::<String, QueryError>(QueryKey::from("dirty_a"), cx);
+            let dirty_b = client.resource::<String, QueryError>(QueryKey::from("dirty_b"), cx);
+            (handle, dirty_a, dirty_b)
+        });
+        H {
+            dirty_a,
+            dirty_b,
+            _handle: handle,
+        }
+    });
+    cx.update(|cx| {
+        let (dirty_a, dirty_b) =
+            harness.read_with(cx, |h, _| (h.dirty_a.clone(), h.dirty_b.clone()));
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            for entity in [dirty_a, dirty_b] {
+                entity.update(cx, |r, _| {
+                    r.apply_success("v1".to_string(), crate::client::current_time_ms())
+                });
+            }
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        SERIALIZATIONS.load(Ordering::SeqCst),
+        2,
+        "the first flush serializes both live entries"
+    );
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.set_query_data::<String, QueryError>("dirty_b", "v2".to_string(), cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        SERIALIZATIONS.load(Ordering::SeqCst),
+        3,
+        "unchanged dirty_a must not be re-serialized"
+    );
+    let saved = captured.lock().unwrap().clone().expect("flush 2 saved");
+    assert_eq!(
+        saved.entries.get("dirty_b").map(|e| &e.value),
+        Some(&serde_json::json!("v2"))
+    );
+    assert_eq!(
+        saved.entries.get("dirty_a").map(|e| &e.value),
+        Some(&serde_json::json!("v1")),
+        "the unchanged entry stays in the saved store"
+    );
+    let _ = harness;
+}
+
+#[gpui::test]
+fn unchanged_cache_flushes_nothing(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let save_count = persister.save_count.clone();
+
+    struct H {
+        steady: Entity<QueryResource<String, QueryError>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (handle, steady) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
+            let steady = client.resource::<String, QueryError>(QueryKey::from("steady"), cx);
+            (handle, steady)
+        });
+        H {
+            steady,
+            _handle: handle,
+        }
+    });
+    cx.update(|cx| {
+        let entity = harness.read(cx).steady.clone();
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            entity.update(cx, |r, _| {
+                r.apply_success("v".to_string(), crate::client::current_time_ms())
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *save_count.lock().unwrap(),
+        1,
+        "the data write flushed exactly once"
+    );
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *save_count.lock().unwrap(),
+        1,
+        "a bump without a data write must not save"
+    );
+    let _ = harness;
+}
+
+#[gpui::test]
+fn set_query_data_write_flushes_without_touching_timestamp(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let captured = persister.last_saved.clone();
+    let save_count = persister.save_count.clone();
+
+    struct H {
+        epoch_key: Entity<QueryResource<String, QueryError>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (handle, epoch_key) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
+            let epoch_key = client.resource::<String, QueryError>(QueryKey::from("epoch_key"), cx);
+            (handle, epoch_key)
+        });
+        H {
+            epoch_key,
+            _handle: handle,
+        }
+    });
+    cx.update(|cx| {
+        let entity = harness.read(cx).epoch_key.clone();
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            entity.update(cx, |r, _| {
+                r.apply_success("v1".to_string(), crate::client::current_time_ms())
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    let first_cached_at = captured
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.entries.get("epoch_key"))
+        .map(|e| e.cached_at)
+        .expect("the first flush stored epoch_key");
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.set_query_data::<String, QueryError>("epoch_key", "v2".to_string(), cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(*save_count.lock().unwrap(), 2);
+    let saved = captured.lock().unwrap().clone().expect("flush 2 saved");
+    let entry = saved.entries.get("epoch_key").expect("epoch_key persisted");
+    assert_eq!(entry.value, serde_json::json!("v2"));
+    assert_eq!(
+        entry.cached_at, first_cached_at,
+        "set_data leaves last_updated_at untouched; the data epoch is the flush signal"
+    );
+    let _ = harness;
+}
+
+#[gpui::test]
+fn removed_key_is_pruned_from_the_saved_store(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let captured = persister.last_saved.clone();
+
+    struct H {
+        pruned_out: Entity<QueryResource<String, QueryError>>,
+        pruned_stay: Entity<QueryResource<String, QueryError>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (handle, pruned_out, pruned_stay) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
+            let pruned_out =
+                client.resource::<String, QueryError>(QueryKey::from("pruned_out"), cx);
+            let pruned_stay =
+                client.resource::<String, QueryError>(QueryKey::from("pruned_stay"), cx);
+            (handle, pruned_out, pruned_stay)
+        });
+        H {
+            pruned_out,
+            pruned_stay,
+            _handle: handle,
+        }
+    });
+    cx.update(|cx| {
+        let (out, stay) =
+            harness.read_with(cx, |h, _| (h.pruned_out.clone(), h.pruned_stay.clone()));
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            for entity in [out, stay] {
+                entity.update(cx, |r, _| {
+                    r.apply_success("v1".to_string(), crate::client::current_time_ms())
+                });
+            }
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    let first = captured.lock().unwrap().clone().expect("flush 1 saved");
+    assert!(first.entries.contains_key("pruned_out"));
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.remove_queries(&QueryKeyFilter::Exact(&QueryKey::from("pruned_out")));
+            client.set_query_data::<String, QueryError>("pruned_stay", "v2".to_string(), cx);
+        });
+    });
+    cx.run_until_parked();
+
+    let saved = captured.lock().unwrap().clone().expect("flush 2 saved");
+    assert!(
+        !saved.entries.contains_key("pruned_out"),
+        "a removed key must not resurrect in the saved store: {:?}",
+        saved.entries.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        saved.entries.get("pruned_stay").map(|e| &e.value),
+        Some(&serde_json::json!("v2"))
+    );
+    let _ = harness;
+}
+
+#[gpui::test]
+fn colon_collision_keys_persist_distinct_and_hydrate_exact(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let key_a = QueryKey::from(["a::", ""]);
+    let key_b = QueryKey::from(["a", "::"]);
+
+    let snapshot = cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            for (key, value) in [(&key_a, "alpha"), (&key_b, "beta")] {
+                let e = client.resource::<String, QueryError>(key.clone(), cx);
+                e.update(cx, |r, _| {
+                    r.apply_success(value.to_string(), crate::client::current_time_ms())
+                });
+            }
+            client.collect_persist_snapshot(&PersistFilter::All, DAY, cx)
+        })
+    });
+    assert_ne!(key_a.to_path(), key_b.to_path());
+    assert_eq!(
+        snapshot.entries.len(),
+        2,
+        "the collision pair must map to distinct paths: {:?}",
+        snapshot.entries.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        snapshot.entries.get(&key_a.to_path()).map(|e| &e.value),
+        Some(&serde_json::json!("alpha"))
+    );
+    assert_eq!(
+        snapshot.entries.get(&key_b.to_path()).map(|e| &e.value),
+        Some(&serde_json::json!("beta"))
+    );
+    *persister.load_value.lock().unwrap() = Some(snapshot);
+
+    for (filter_key, expected, other) in [
+        (key_a.clone(), "alpha", &key_b),
+        (key_b.clone(), "beta", &key_a),
+    ] {
+        let mut fresh = QueryClient::new();
+        fresh.register_deserializer::<String, QueryError>(|v| v.as_str().map(|s| s.to_string()));
+        let held = cx.update(|cx| {
+            vec![
+                fresh.resource::<String, QueryError>(key_a.clone(), cx),
+                fresh.resource::<String, QueryError>(key_b.clone(), cx),
+            ]
+        });
+        let outcome = cx.update(|cx| {
+            block_on_ready(hydrate(
+                &mut fresh,
+                &persister,
+                &PersistFilter::Exact(filter_key.clone()),
+                DAY,
+                cx,
+            ))
+        });
+        assert!(
+            outcome.is_ok(),
+            "hydrate should succeed: {:?}",
+            outcome.err()
+        );
+        cx.update(|cx| {
+            assert_eq!(
+                fresh.get_query_data::<String, QueryError>(&filter_key, cx),
+                Some(expected.to_string()),
+                "Exact must match the reconstructed segments"
+            );
+            assert_eq!(
+                fresh.get_query_data::<String, QueryError>(other, cx),
+                None,
+                "the other collision key must not be primed by this Exact filter"
+            );
+        });
+        drop(held);
+    }
+}
+
+#[gpui::test]
+fn hydrate_discards_previous_format_version(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let mut stale = PersistSnapshot {
+        entries: Default::default(),
+        version: crate::client::PERSIST_VERSION - 1,
+    };
+    stale.entries.insert(
+        "old_format_key".to_string(),
+        PersistedEntry {
+            value: serde_json::json!("stale"),
+            cached_at: crate::client::current_time_ms(),
+            cache_policy: crate::core::CachePolicy::default(),
+            meta: None,
+        },
+    );
+    *persister.load_value.lock().unwrap() = Some(stale);
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, _cx| {
+            client
+                .register_deserializer::<String, QueryError>(|v| v.as_str().map(|s| s.to_string()));
+        });
+        let outcome = cx.update_global::<QueryClient, _>(|client, cx| {
+            block_on_ready(hydrate(client, &persister, &PersistFilter::All, DAY, cx))
+        });
+        match outcome {
+            Err(PersistError::VersionMismatch { expected, found }) => {
+                assert_eq!(expected, crate::client::PERSIST_VERSION);
+                assert_eq!(found, crate::client::PERSIST_VERSION - 1);
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            assert_eq!(
+                client.get_query_data::<String, QueryError>(&QueryKey::from("old_format_key"), cx),
+                None,
+                "a previous-format snapshot must not prime any value"
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn infinite_first_page_reuses_flushed_payload_until_pages_change(cx: &mut TestAppContext) {
+    static SERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counting_serialize(value: &Vec<String>) -> serde_json::Value {
+        SERIALIZATIONS.fetch_add(1, Ordering::SeqCst);
+        serde_json::to_value(value).expect("serialize")
+    }
+
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let save_count = persister.save_count.clone();
+
+    struct H {
+        feed: Entity<InfiniteQueryResource<Vec<String>, QueryError>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (handle, feed) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<Vec<String>, QueryError>(counting_serialize);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
+            let feed = client
+                .infinite_resource::<Vec<String>, QueryError>(QueryKey::from("inf-flush"), cx);
+            (handle, feed)
+        });
+        H {
+            feed,
+            _handle: handle,
+        }
+    });
+    cx.update(|cx| {
+        let feed = harness.read_with(cx, |h, _| h.feed.clone());
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            feed.update(cx, |r, _| {
+                let mut seq = crate::core::RequestSequencer::new();
+                let now = crate::client::current_time_ms();
+                let id = r.begin_fetch_next(&mut seq, now).expect("fetch starts");
+                assert!(r.complete_page_success(id, vec!["page-0".to_string()], true, true, now));
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        SERIALIZATIONS.load(Ordering::SeqCst),
+        1,
+        "the first flush serializes the fresh first page"
+    );
+
+    cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        SERIALIZATIONS.load(Ordering::SeqCst),
+        1,
+        "an unchanged first page must not be re-serialized"
+    );
+    assert_eq!(
+        *save_count.lock().unwrap(),
+        1,
+        "nothing dirty means no save"
+    );
+
+    cx.update(|cx| {
+        let feed = harness.read_with(cx, |h, _| h.feed.clone());
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            feed.update(cx, |r, _| {
+                let mut seq = crate::core::RequestSequencer::new();
+                let now = crate::client::current_time_ms();
+                r.set_has_previous_page(true);
+                let id = r
+                    .begin_fetch_previous(&mut seq, now)
+                    .expect("previous fetch starts");
+                assert!(r.complete_page_success(id, vec!["page-1".to_string()], false, false, now));
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        SERIALIZATIONS.load(Ordering::SeqCst),
+        2,
+        "a page write must re-serialize"
+    );
+    assert_eq!(*save_count.lock().unwrap(), 2);
+    let saved = persister
+        .last_saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("flush 2 saved");
+    assert_eq!(
+        saved.entries.get("inf-flush").map(|e| &e.value),
+        Some(&serde_json::json!(["page-1"])),
+        "the re-serialized payload must carry the new first page"
+    );
+    let _ = harness;
+}
+
+#[gpui::test]
+#[ignore = "probe: quantitative, run with --ignored"]
+fn integration_persist_collect_delta_vs_full_cost(cx: &mut TestAppContext) {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    setup_query_client(cx);
+    let held: Vec<Entity<QueryResource<String, QueryError>>> = cx.update(|cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            (0..2_000usize)
+                .map(|i| {
+                    let e = client
+                        .resource::<String, QueryError>(QueryKey::from(format!("probe/{i}")), cx);
+                    e.update(cx, |r, _| {
+                        r.apply_success(format!("value-{i}"), crate::client::current_time_ms())
+                    });
+                    e
+                })
+                .collect()
+        })
+    });
+
+    let (full, delta, reused, flushed) = cx.update(|cx| {
+        let filter = PersistFilter::All;
+        let day = DAY;
+        let mut flushed: HashMap<String, (gpui::EntityId, u64)> = HashMap::new();
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            let first = client.collect_persist_delta(&filter, day, &flushed, cx);
+            for c in &first.fresh {
+                flushed.insert(c.path.clone(), (c.entity_id, c.epoch));
+            }
+            let full_start = Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(client.collect_persist_snapshot(&filter, day, cx));
+            }
+            let full = full_start.elapsed() / 100;
+            let delta_start = Instant::now();
+            let mut reused_count = 0usize;
+            for _ in 0..100 {
+                let out = client.collect_persist_delta(&filter, day, &flushed, cx);
+                reused_count = out.reused.len();
+                std::hint::black_box(out);
+            }
+            let delta = delta_start.elapsed() / 100;
+            (full, delta, reused_count, flushed.len())
+        })
+    });
+    println!(
+        "probe persist-collect over 2000 live Success entries, 100 sweeps: full-collect {full:?}/sweep, delta-collect {delta:?}/sweep (reused={reused}, flushed={flushed})"
+    );
+    let _ = held;
+}
+
+#[gpui::test]
+fn evicted_and_recreated_entry_reserializes_at_matching_write_count(cx: &mut TestAppContext) {
+    setup_query_client(cx);
+    let persister = MemPersister::default();
+    let captured = persister.last_saved.clone();
+    let save_count = persister.save_count.clone();
+
+    struct H {
+        _first: Entity<QueryResource<String, QueryError>>,
+        second: Option<Entity<QueryResource<String, QueryError>>>,
+        _handle: PersistHandle,
+    }
+    let harness = cx.new(|cx| {
+        let (first, handle) = cx.update_global::<QueryClient, _>(|client, cx| {
+            client.register_serializer::<String, QueryError>(ser_string);
+            let first = client.resource::<String, QueryError>(QueryKey::from("recreated"), cx);
+            let handle = client.persist_with(persister.clone(), zero_debounce(), cx);
+            (first, handle)
+        });
+        H {
+            _first: first,
+            second: None,
+            _handle: handle,
+        }
+    });
+
+    cx.update(|cx| {
+        let first = harness.read_with(cx, |h, _| h._first.clone());
+        cx.update_global::<QueryClient, _>(|_client, cx| {
+            first.update(cx, |r, _| {
+                r.apply_success("v1".to_string(), crate::client::current_time_ms())
+            });
+            cx.default_global::<CacheMutation>();
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(*save_count.lock().unwrap(), 1);
+
+    harness.update(cx, |h, cx| {
+        cx.update_global::<QueryClient, _>(|client, cx| {
+            client.remove_queries(&QueryKeyFilter::Exact(&QueryKey::from("recreated")));
+            let second = client.resource::<String, QueryError>(QueryKey::from("recreated"), cx);
+            second.update(cx, |r, _| {
+                r.apply_success("v2".to_string(), crate::client::current_time_ms())
+            });
+            cx.default_global::<CacheMutation>();
+            h.second = Some(second);
+        });
+    });
+    cx.run_until_parked();
+
+    let saved = captured.lock().unwrap().clone().expect("flush 2 saved");
+    assert_eq!(
+        saved.entries.get("recreated").map(|e| &e.value),
+        Some(&serde_json::json!("v2")),
+        "a recreated entry whose write count matches its pre-eviction flushed \
+         epoch must still re-serialize; the flushed gate needs entity identity"
+    );
+    let _ = harness;
 }

@@ -1,0 +1,55 @@
+name: Wasm Check
+
+# Guards the wasm compile boundary so it cannot silently regress: the
+# core-only main crate and the http satellite (default and reqwest-backed)
+# must build for wasm32-unknown-unknown, and the native all-features build
+# must stay green for the GPUI-bound layers (client/hook/persist and the
+# persist satellite are native-only and are never built for wasm here).
+# Mirrored locally by `just wasm-check`.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - ".github/workflows/**"
+      - "justfile"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - ".github/workflows/**"
+      - "justfile"
+
+concurrency:
+  group: wasm-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wasm-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # No `workspaces` override: cargo runs from the repo root, so the
+      # root workspace manifest is the right cache key. Cargo.lock is not
+      # committed; rust-cache keys off the manifests that exist.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build gpui-query core for wasm32
+        run: cargo build --target wasm32-unknown-unknown -p gpui-query --no-default-features --features core
+
+      - name: Build gpui-query-http for wasm32
+        run: cargo build --target wasm32-unknown-unknown -p gpui-query-http
+
+      - name: Build gpui-query-http with reqwest for wasm32
+        run: cargo build --target wasm32-unknown-unknown -p gpui-query-http --features reqwest
+
+      - name: Build all features (native)
+        run: cargo build --all-features

@@ -1,6 +1,3 @@
-//! Struct definition, serde helpers, constants, and constructors for
-//! [`InfiniteQueryResource`].
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -11,41 +8,21 @@ use crate::core::{
     RequestPolicy, RequestSequencer, RetryPolicy,
 };
 
-/// Default maximum number of pages to retain.
 const DEFAULT_MAX_PAGES: usize = 50;
 
-/// Direction mode for an infinite query.
-///
-/// Controls the default assumptions for `has_next_page` and
-/// `has_previous_page` on construction and after `reset()`.
-///
-/// - **ForwardOnly** (default): `has_next_page` starts `true`, `has_previous_page` starts `false`.
-///   This is the common case for feed-style pagination where you only fetch next pages.
-///   The `true` default for `has_next_page` assumes more pages exist until the fetcher says
-///   otherwise.
-///
-/// - **Bidirectional**: Both `has_next_page` and `has_previous_page` start `false`.
-///   The query will not attempt to fetch in either direction until the caller explicitly
-///   sets `has_next_page(true)` or `has_previous_page(true)`, or the fetcher returns
-///   `has_more = true` from a successful completion.
+/// `ForwardOnly` (default) starts `has_next_page = true`; `Bidirectional`
+/// starts both flags `false`, so nothing is fetched until the caller or
+/// fetcher opts in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FetchDirection {
-    /// Fetch next pages only. `has_next_page` defaults to `true`.
     #[default]
     ForwardOnly,
-    /// Fetch in both directions. Both flags default to `false`.
     Bidirectional,
 }
 
-/// An infinite query resource that manages paginated data.
-///
-/// Inspired by TanStack Query's `useInfiniteQuery`. Each "page" is a `T` —
-/// typically a batch of items fetched from an API.
-///
-/// Pages are stored internally as `Arc<T>` so that [`last_page_arc`](Self::last_page_arc)
-/// and [`first_page_arc`](Self::first_page_arc) can hand the fetcher a cheap
-/// `Arc::clone` instead of cloning the full page data.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Pages are stored as `Arc<T>` so the `*_arc` accessors can hand the fetcher
+/// a cheap clone instead of copying the page.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(serialize = "T: serde::Serialize, E: serde::Serialize"))]
 #[serde(bound(deserialize = "T: serde::de::DeserializeOwned, E: serde::de::DeserializeOwned"))]
 pub struct InfiniteQueryResource<T, E = QueryError> {
@@ -59,27 +36,24 @@ pub struct InfiniteQueryResource<T, E = QueryError> {
     pub(super) request_policy: RequestPolicy,
     pub(super) started_at: Option<QueryTimestamp>,
     pub(super) last_updated_at: Option<QueryTimestamp>,
+    /// Counts page writes, not value changes; runtime only, so change
+    /// detection never deep-compares `T`.
+    #[serde(skip)]
+    pub(super) data_epoch: u64,
     pub(super) cache_hits: u64,
     pub(super) cancelled_count: u64,
     pub(super) ignored_results: u64,
     pub(super) retry_count: u32,
     pub(super) has_next_page: bool,
     pub(super) has_previous_page: bool,
-    /// Which direction (if any) is currently being fetched.
-    ///
-    /// Collapses the previous `is_fetching_next_page` / `is_fetching_previous_page`
-    /// pair into a single `Option<PageDirection>`, making the mutual-exclusion
-    /// invariant unbreakable at the type level (N18). The two boolean getters
-    /// are retained for backwards compatibility.
+    /// One `Option` instead of two booleans: "only one direction in flight"
+    /// holds by construction.
     pub(super) fetching_direction: Option<super::lifecycle::PageDirection>,
     pub(super) max_pages: Option<usize>,
     pub(super) direction: FetchDirection,
     pub(super) retry_policy: RetryPolicy,
-    /// Per-resource sequencer used by [`begin_fetch`](Self::begin_fetch_next)
-    /// when no external id is supplied, so transient callers without a
-    /// `QueryClient` still get monotonic, collision-free ids instead of every
-    /// call colliding at `RequestId(1,1)` (N3). `#[serde(skip)]` — runtime
-    /// state, not persisted.
+    /// Runtime state, not persisted; supplies monotonic ids when no external
+    /// sequencer is provided.
     #[serde(skip)]
     pub(super) transient_sequencer: RequestSequencer,
     #[serde(skip)]
@@ -89,10 +63,51 @@ pub struct InfiniteQueryResource<T, E = QueryError> {
     pub(crate) current_task: crate::core::current_task::CurrentTask,
 }
 
-/// Serde helpers for `VecDeque<Arc<T>>` — serializes as a plain sequence and
-/// deserializes into `VecDeque<Arc<T>>`. This keeps the wire format identical
-/// to the old `Vec<T>` representation so existing cached data remains
-/// compatible (`Arc<T>` serializes transparently as `T`).
+/// Observable state only; `data_epoch` is bookkeeping and must not split two
+/// otherwise-equal resources, matching `QueryResource`.
+impl<T: PartialEq, E: PartialEq> PartialEq for InfiniteQueryResource<T, E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.pages == other.pages
+            && self.status == other.status
+            && self.error == other.error
+            && self.active_request_id == other.active_request_id
+            && self.cache_policy == other.cache_policy
+            && self.request_policy == other.request_policy
+            && self.started_at == other.started_at
+            && self.last_updated_at == other.last_updated_at
+            && self.cache_hits == other.cache_hits
+            && self.cancelled_count == other.cancelled_count
+            && self.ignored_results == other.ignored_results
+            && self.retry_count == other.retry_count
+            && self.has_next_page == other.has_next_page
+            && self.has_previous_page == other.has_previous_page
+            && self.fetching_direction == other.fetching_direction
+            && self.max_pages == other.max_pages
+            && self.direction == other.direction
+            && self.retry_policy == other.retry_policy
+            && self.transient_sequencer == other.transient_sequencer
+            && self.signal == other.signal
+            && self.current_task_eq(other)
+    }
+}
+
+impl<T: PartialEq + Eq, E: PartialEq + Eq> Eq for InfiniteQueryResource<T, E> {}
+
+impl<T, E> InfiniteQueryResource<T, E> {
+    #[cfg(feature = "client")]
+    fn current_task_eq(&self, other: &Self) -> bool {
+        self.current_task == other.current_task
+    }
+
+    #[cfg(not(feature = "client"))]
+    fn current_task_eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+/// The wire format is a plain sequence, identical to the old `Vec<T>`
+/// representation, so previously persisted data stays readable.
 pub(super) mod vec_deque_serde {
     use std::collections::VecDeque;
     use std::sync::Arc;
@@ -108,10 +123,7 @@ pub(super) mod vec_deque_serde {
     {
         let mut seq = serializer.serialize_seq(Some(deque.len()))?;
         for item in deque {
-            // Serialize the inner `T` directly (`&**item`) rather than the
-            // `Arc<T>`. This avoids requiring `Arc<T>: Serialize` (which is only
-            // available with serde's `rc` feature / certain configs) and keeps
-            // the wire format identical to the old `Vec<T>` representation.
+            // Serialize the inner T: requiring `Arc<T>: Serialize` would need serde's `rc` feature.
             seq.serialize_element(&**item)?;
         }
         seq.end()
@@ -128,13 +140,8 @@ pub(super) mod vec_deque_serde {
 }
 
 impl<T, E> InfiniteQueryResource<T, E> {
-    /// Create a new infinite query resource.
-    ///
-    /// **v2**: `max_pages` defaults to `Some(50)` to prevent unbounded memory growth.
-    ///
-    /// **Audit 3**: Uses `FetchDirection::ForwardOnly` by default, meaning
-    /// `has_next_page` starts `true`. Use [`new_bidirectional`](Self::new_bidirectional)
-    /// for queries that paginate in both directions.
+    /// `max_pages` defaults to `Some(50)`; ForwardOnly, so `has_next_page`
+    /// starts `true`.
     pub fn new(
         key: impl Into<QueryKey>,
         cache_policy: CachePolicy,
@@ -148,11 +155,8 @@ impl<T, E> InfiniteQueryResource<T, E> {
         )
     }
 
-    /// Create a new infinite query resource configured for bidirectional paging.
-    ///
-    /// Both `has_next_page` and `has_previous_page` default to `false`. The
-    /// query will not attempt to fetch in either direction until the caller
-    /// explicitly enables it.
+    /// Both flags start `false`; the query fetches nothing until the caller
+    /// explicitly enables a direction.
     pub fn new_bidirectional(
         key: impl Into<QueryKey>,
         cache_policy: CachePolicy,
@@ -166,7 +170,6 @@ impl<T, E> InfiniteQueryResource<T, E> {
         )
     }
 
-    /// Create a new infinite query resource with an explicit [`FetchDirection`].
     pub(crate) fn with_direction(
         key: impl Into<QueryKey>,
         cache_policy: CachePolicy,
@@ -187,6 +190,7 @@ impl<T, E> InfiniteQueryResource<T, E> {
             request_policy,
             started_at: None,
             last_updated_at: None,
+            data_epoch: 0,
             cache_hits: 0,
             cancelled_count: 0,
             ignored_results: 0,
@@ -207,7 +211,6 @@ impl<T, E> InfiniteQueryResource<T, E> {
 
 #[cfg(feature = "client")]
 impl<T, E> InfiniteQueryResource<T, E> {
-    /// Store a new background task, cancelling any previously stored task.
     pub(crate) fn set_current_task(&mut self, task: gpui::Task<()>) {
         self.current_task.set(task);
     }

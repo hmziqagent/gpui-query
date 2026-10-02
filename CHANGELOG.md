@@ -5,6 +5,125 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-02
+
+> A campaign pass over the query lifecycle: direct cache writes now reach the UI, GC and eviction stop dropping live entries, request ids survive bucket churn, error redaction covers the connection strings it missed, and persistence gains dirty tracking, ordered saves, and collision-free key paths.
+
+### Fixed
+
+#### `gpui-query` — direct cache writes reach mounted observers
+
+- `set_query_data`, `PreparedFetch::complete`, and `hydrate` mutated resources without `cx.notify()`, so mounted `use_query`/`use_query_select` consumers never re-rendered on the documented optimistic-update and prefetch flows. They notify now, the observer dedup wakes on data-only writes to an already-`Success` entry, and `reset_queries` wakes its observers too.
+
+#### `gpui-query` — GC and eviction keep live entries
+
+- GC aged every resource without a completion timestamp as fully expired, so live never-fetched entries and `set_query_data`/hydrate-primed keys were dropped at the next sweep and a later `resource()` call minted a divergent second entity for the same key. Entries carry an insertion baseline now, and `invalidate`/`reset` refresh it. `evict_oldest` no longer pays a weak-upgrade scan per insert at the 10,000-entry cap (about 900x the normal insert cost before) and evicts dead entries first. Cancelled mutations are GC-stamped.
+- After `remove_queries` dropped a bucket entry while a fetch was in flight, the resource's transient sequencer minted fallback ids in the same space as bucket ids, so a stale completion could pass `accept_current_request` and discard the fresh result. Fallback ids draw from a reserved scope now. Under StaleWhileRevalidate + `IgnoreWhileLoading`, revalidation also spawned a duplicate fetcher racing the original for one request id; that case is ignored at the hook, prefetch, and prepared-fetch sites.
+
+#### `gpui-query` — mutation cancel is a terminal transition
+
+- `MutationResource::cancel` clears stale success data beside the `Failure` status, matching what `complete_failure` always documented, and a late `Ok` from the mutation future can no longer overwrite a terminal `Failure`.
+
+#### `gpui-query` — redaction covers the schemes and shapes it missed
+
+- `sanitized()` matched only four exact scheme spellings, so `postgresql://`, `rediss://`, `mongodb+srv://`, `mysql2://`, `amqp://`, and `mssql://` connection strings leaked credentials verbatim; `PATH_NEEDLES` used forward slashes only, so Windows-style paths leaked entirely; and dotted-local-part + dotless-domain emails (`j.smith@intranet`) escaped the email pass. All three are covered, and the connection and email passes are linear on adversarial input (the email path measured ~895 ms at 32 KiB before; output is byte-identical on all prior inputs).
+
+#### `gpui-query` — persistence
+
+- `QueryKey::to_path` was not injective: `["a::", ""]` and `["a", "::"]` both produced `"a::::"`, so two live queries silently overwrote each other in the snapshot and re-hydrated as a key matching neither origin. The path format escapes the separator and `PERSIST_VERSION` is bumped: old snapshots are discarded rather than misread, so expect one cold cache after upgrading if you persist.
+- Every debounce flush re-serialized the entire cache on the UI thread regardless of what changed. Flushes are dirty-tracked by a data epoch, unchanged entries reuse their stored payloads, removals are pruned, saves run strictly in order, and `Persister::save` still receives the full accumulated store.
+
+### Changed
+
+- `QueryResource` exposes an additive `data_epoch()`; `use_query_select` compares epochs instead of deep-comparing `T` on every notification and clones only on real change (the compare was ~93% of per-notify cost on a 1.6 MB payload). The `T: PartialEq` hook bound is unchanged.
+- Criterion benches (sanitize, key path, request policy, request id, persist round-trip) land as dev-dependency tooling with a recorded baseline for regression gating; nothing ships to consumers.
+- The docs match the shipped API: the rollback guides use the real `set_query_data` capture/restore pattern instead of the nonexistent `rollback_query_data`, and the mutations page documents this crate's `MutationResource` instead of the deprecated legacy crate's.
+
+## [0.2.2] - 2026-09-21
+
+> Audit-driven fixes across all three crates: a release-profile compile break, wider secret redaction, retry counters that match their docs, RFC 9111 cache refresh, and a durability fix in the file persister.
+
+### Fixed
+
+#### `gpui-query` — release-profile compile break
+
+- `cargo build --release` with the `hook` feature failed to compile: a release-only fallback in `use_query` called `cx.new` without the `AppContext` trait in scope. Dev-profile builds were unaffected, which is why the test suite never saw it. CI now builds and lints the release profile on every push and pull request.
+
+#### `gpui-query` — wider secret redaction in error text
+
+- The sanitizer now catches the shapes secrets arrive in: underscore-bearing email local parts (`alice@secret_word@corp.com`), `bearer` and `token` values behind any mix of whitespace and `:`/`=` separators including doubled ones (`bearer ==`), digit-bearing TLDs (`alice@corp.c0m`, `a@b.0rg`), and trailing-dot hostnames (`alice@corp.com.`). Redaction only grows — nothing that was redacted before passes through now.
+
+#### `gpui-query` — `retry_count` behaves the same in every hook
+
+- A fetch result discarded by a newer request no longer clobbers the live entry's retry counter, `use_infinite_query` increments it between attempts, and `use_mutation` resets it when a mutation succeeds.
+
+#### `gpui-query-http` — `304` responses refresh stored entries
+
+- Per RFC 9111 §4.3.4, a validated `304` updates the stored response and its timestamp, unless the 304's own `Cache-Control` blocks caching. Previously the timestamp never moved, so a revalidated entry stayed stale forever after. A late 304 also no longer clobbers a concurrent refresh: the update applies only if the stored metadata is unchanged since the fetch began.
+
+#### `gpui-query-http` — parse errors cap echoed header bytes
+
+- `ParseError` values embed at most 512 bytes of the offending header, suffixed with `...[truncated]`, so hostile `Cache-Control` fields cannot balloon error text.
+
+#### `gpui-query-persist` — parent directory fsynced for bare filenames
+
+- `FilePersister::json("cache.json")` produced an empty parent path, so the post-rename directory fsync silently did nothing. Bare and relative paths now resolve their parent correctly, and the raw `fsync` FFI call is replaced by `File::sync_all`.
+
+### Changed
+
+- READMEs are compiled as doctests, which caught every quick-start calling `App::new()` (never a method on gpui 0.2.2) plus a handful of drifted signatures, all now fixed.
+- Version literals in the skill packs are synced by the release workflow, alongside the READMEs and the docs install page.
+
+## [0.2.1] - 2026-09-19
+
+> Wasm32 compile support for `core` and `gpui-query-http`, publish fixes for the satellite crates, and real test coverage in CI.
+
+### Added
+
+#### `gpui-query` — wasm32 support for the `core` layer
+
+- The `core` layer builds for `wasm32-unknown-unknown`: on wasm targets `ahash` switches from runtime RNG to `compile-time-rng` internally (its `runtime-rng` default pulls `getrandom`, which cannot compile there), so no consumer configuration is needed. The `client`, `hook`, and `persist` layers stay native-only — they depend on `gpui`, which does not build for `wasm32-unknown-unknown`.
+- The wasm support boundary is documented in the root and main-crate READMEs.
+
+#### `gpui-query-http` — wasm32 support, including the `reqwest` feature
+
+- The crate compiles for `wasm32-unknown-unknown` with the default feature set and with the `reqwest` feature — the same feature flags work on both targets. On wasm, `ReqwestBackend` runs on reqwest's browser-fetch backend and TLS is the browser's job.
+- `MaybeSend` marker alias for `Send`, relaxed to a no-op on `wasm32` (exported at the crate root): `HttpBackend::fetch` bounds its returned future with `MaybeSend` instead of `Send`. On native targets the bound is exactly `Send`, so existing `+ Send` backend impls keep compiling unchanged; on `wasm32` it drops the requirement, because browser-fetch futures (reqwest's included) are inherently `!Send` — they hold JS values.
+- The README gained a WebAssembly section showing how to write a backend that compiles on both native and wasm targets.
+
+#### CI — wasm compile guard
+
+- New "Wasm Check" workflow (plus a `just wasm-check` recipe mirroring it) builds the core-only main crate and the `http` satellite — with and without `reqwest` — for `wasm32-unknown-unknown`, then the native all-features build, on every push and pull request, so the wasm boundary cannot silently regress.
+
+### Changed
+
+- CI now runs `cargo test --all-features` on every push and pull request (new "Cargo Test" workflow). Previously every workflow was build-only and the full suite ran only locally via `just test`; the job installs the X11 link dependencies (`libx11-xcb-dev`, `libxkbcommon-x11-dev`) that GPUI-linked test binaries need.
+- Publish workflows' rust-cache override pointed at a member directory cargo never writes to, so target-dir caching never hit; the override is dropped in favor of the default workspace-root mapping. `gpui-query-legacy` keeps its mapping intentionally — it is excluded from the workspace and is its own workspace root.
+- The PR checks workflow now also validates changes to the sibling web deploy workflows (`deploy.yml`, `web-preview.yml`), which previously triggered no checks at all.
+
+### Fixed
+
+#### `gpui-query-http` — publish blocker and docs.rs metadata
+
+- The `gpui-query` dependency now carries `version = "0.2"` alongside its path: `cargo publish` strips path overrides, so the previously versionless dependency made the crate unpublishable.
+- docs.rs now renders with every feature and annotates `reqwest`-gated items with the feature that enables them, so `ReqwestBackend` and its module appear with live intra-doc links instead of dead ones.
+- Three redundant intra-doc link targets simplified; the rendered docs are unchanged and rustdoc's warnings are gone.
+
+#### `gpui-query-persist` — publish blocker and docs.rs metadata
+
+- Same publish blocker fixed: the `gpui-query` path dependency gains `version = "0.2"`, and `cargo publish --dry-run` now verifies the crate against the crates.io release.
+- Fleet-consistent docs.rs metadata added (`all-features = true`, `rustdoc-args = ["--cfg", "docsrs"]`); behaviorally a no-op today, as the crate has no optional features.
+- One redundant intra-doc link simplified.
+
+#### `gpui-query` — warning-free core-only builds
+
+- `core`-only builds no longer warn about the unused `last_updated_at_ms` accessor (only the `client` layer reads it).
+
+#### CI — release workflow guards
+
+- Changelog Release now fetches tags on checkout, so the "already released?" guard actually sees existing tags instead of always re-attempting the release.
+- The publish and web-deploy jobs run only when the guard decides a release should happen; merging CHANGELOG edits that do not cut a release (such as new `[Unreleased]` entries) no longer re-runs `cargo publish` or redeploys the website.
+
 ## [0.2.0] - 2026-07-21
 
 > Disk persistence, server-driven cache policy, and two new companion crates.
@@ -153,6 +272,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Initial public release
 
+[0.2.1]: https://github.com/freeoxide/gpui-query/releases/tag/v0.2.1
 [0.2.0]: https://github.com/freeoxide/gpui-query/releases/tag/v0.2.0
 [0.1.4]: https://github.com/freeoxide/gpui-query/releases/tag/v0.1.4
 [0.1.3]: https://github.com/freeoxide/gpui-query/releases/tag/v0.1.3

@@ -12,7 +12,6 @@
 // `auto-trailing-slash`), and `@astrojs/sitemap` already advertises the
 // extensionless form. Stripping `.html` from just `canonical` and `og:url`
 // keeps the head consistent with the sitemap and the rest of the site.
-// See astro-migration.mdx § "SEO parity checks".
 
 const head = Astro.locals.starlightRoute.head.map((entry) => {
 	const attrs = entry.attrs ?? {};
@@ -31,6 +30,16 @@ const head = Astro.locals.starlightRoute.head.map((entry) => {
 head.push(
 	{ tag: "link", attrs: { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" } },
 	{ tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
+);
+
+// Token-light alternates: advertise the per-page `.md` / `.txt` copies (root of
+// the docs section -> /docs.md; nested pages -> /docs/{...}.md) so agents
+// inspecting the head can find them. See scripts/generate-page-alts.ts.
+const altPath = Astro.url.pathname.replace(/\/+$/, "");
+const altBase = altPath === "" ? "/index" : altPath;
+head.push(
+	{ tag: "link", attrs: { rel: "alternate", type: "text/markdown", href: `${altBase}.md` } },
+	{ tag: "link", attrs: { rel: "alternate", type: "text/plain", href: `${altBase}.txt` } },
 );
 ---
 {head.map(({ tag: Tag, attrs, content }) => <Tag {...attrs} set:html={content} />)}

@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+          # Without fetch-tags, a shallow checkout fetches NO tags, so the
+          # `git tag -l` guard below would always report "not exists" and
+          # every CHANGELOG-path push would re-attempt the release.
+          fetch-tags: true
 
       - name: Extract version from CHANGELOG
         id: changelog
@@ -59,21 +63,28 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/gpui-query/Cargo.toml
           # Keep the version literal in sync across the install snippets that
           # external systems render statically (crates.io README, GitHub README,
-          # docs installation page). Mirrors the Cargo.toml bump above; both the
-          # bare `gpui-query = "x.y.z"` and table `version = "x.y.z"` forms.
+          # docs installation page, skill docs). Mirrors the Cargo.toml bump
+          # above: bare and table `version = "x.y.z"` forms plus the two skill
+          # prose forms `gpui-query (vx.y.z)` and `gpui-query` vx.y.z. Every
+          # pattern anchors on `gpui-query` itself, so the -http and -persist
+          # satellite pins are never touched.
           sed -i -E \
             -e 's|gpui-query = "[^"]*"|gpui-query = "'"$VERSION"'"|g' \
             -e 's|gpui-query = [{] version = "[^"]*"|gpui-query = { version = "'"$VERSION"'"|g' \
+            -e 's|gpui-query \(v[0-9]+\.[0-9]+\.[0-9]+\)|gpui-query (v'"$VERSION"')|g' \
+            -e 's|gpui-query` v[0-9]+\.[0-9]+\.[0-9]+|gpui-query` v'"$VERSION"'|g' \
             README.md \
             crates/gpui-query/README.md \
-            web/src/content/docs/docs/getting-started/installation.mdx
+            web/src/content/docs/docs/getting-started/installation.mdx \
+            skills/gpui-query/SKILL.md \
+            skills/gpui-query-extensions/SKILL.md
 
       - name: Commit version bump
         if: steps.check_tag.outputs.exists == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add crates/gpui-query/Cargo.toml README.md crates/gpui-query/README.md web/src/content/docs/docs/getting-started/installation.mdx
+          git add crates/gpui-query/Cargo.toml README.md crates/gpui-query/README.md web/src/content/docs/docs/getting-started/installation.mdx skills/gpui-query/SKILL.md skills/gpui-query-extensions/SKILL.md
           git diff --cached --quiet || git commit -m "chore: bump gpui-query version to v${{ steps.changelog.outputs.version }}"
 
       - name: Create Git tag
@@ -101,6 +112,10 @@ jobs:
 
   publish-main:
     needs: check-and-release
+    # Same guard as the check_tag-gated steps above, via the job output —
+    # `needs:` alone would still run this job on the skip path (tag already
+    # exists) and re-attempt `cargo publish` on an already-released version.
+    if: needs.check-and-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,9 +124,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # No `workspaces` override: the repo root is the workspace root and
+      # rust-cache resolves the default "." against GITHUB_WORKSPACE, not the
+      # job's working-directory — the old "crates/gpui-query -> target"
+      # mapping cached a directory cargo never writes. The working-directory
+      # on the run steps below is unaffected.
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "crates/gpui-query -> target"
 
       - name: Verify version
         working-directory: crates/gpui-query
@@ -127,6 +145,9 @@ jobs:
 
   deploy-web:
     needs: [publish-main, check-and-release]
+    # Skip-path guard as in publish-main — avoids redundant prod redeploys
+    # when the CHANGELOG's first version heading is already tagged.
+    if: needs.check-and-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     environment: prod
     defaults:

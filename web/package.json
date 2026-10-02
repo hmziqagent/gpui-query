@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "astro dev --port 3000",
-    "build": "rm -rf dist && node scripts/generate-og-images.ts && astro build && npx pagefind --site dist/client && node scripts/generate-llms-txt.ts --output dist/client && node scripts/generate-md-alt.ts --output dist/client",
+    "build": "rm -rf dist && node scripts/generate-og-images.ts && astro build && npx pagefind --site dist/client && node scripts/generate-llms-txt.ts --output dist/client && node scripts/generate-page-alts.ts --output dist/client",
     "preview": "astro preview",
     "og": "node scripts/generate-og-images.ts",
     "deploy": "bun run build && npx wrangler pages deploy dist/client --project-name=gpui-query"

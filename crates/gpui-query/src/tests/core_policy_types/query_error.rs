@@ -1,11 +1,5 @@
-//! Tests for QueryError and QueryErrorKind edge cases.
-
 use crate::core::*;
 use crate::tests::test_support::assert_serde_roundtrip;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// QueryError
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn query_error_kinds() {
@@ -13,6 +7,14 @@ fn query_error_kinds() {
     assert_eq!(QueryError::response("x").kind(), QueryErrorKind::Response);
     assert_eq!(QueryError::transport("x").kind(), QueryErrorKind::Transport);
     assert_eq!(QueryError::unknown("x").kind(), QueryErrorKind::Unknown);
+    assert_eq!(
+        QueryError::new(QueryErrorKind::Transport, "timeout").kind(),
+        QueryErrorKind::Transport
+    );
+    assert_eq!(
+        QueryError::new(QueryErrorKind::Transport, "timeout").message(),
+        "timeout"
+    );
 }
 
 #[test]
@@ -68,15 +70,12 @@ fn query_error_from_string_ref() {
 #[test]
 fn query_error_as_ref_str() {
     let err = QueryError::response("detail");
-    // Disambiguate: QueryError impls both AsRef<str> and AsRef<Arc<str>>,
-    // so a bare `err.as_ref()` is ambiguous (E0283).
     let s: &str = err.as_ref();
     assert_eq!(s, "detail");
 }
 
 #[test]
 fn query_error_serde_roundtrip() {
-    // T10: shared roundtrip helper.
     assert_serde_roundtrip(&[
         QueryError::transport("connection refused"),
         QueryError::cancelled("aborted"),
@@ -143,19 +142,10 @@ fn query_error_sanitized_home_path() {
 
 #[test]
 fn query_error_sanitized_users_path_uppercase() {
-    // NOTE: The sanitizer lowercases the text for matching but the prefix
-    // "/Users/" contains uppercase, so the case-insensitive find may not match
-    // depending on the input. Verify the actual behavior:
     let err = QueryError::unknown("error in /Users/admin/.env leaked");
     let clean = err.sanitized();
-    // The redact_paths function lowercases the text but tries to find the
-    // mixed-case prefix "/Users/" in the lowercased version — which won't match.
-    // This is a known limitation of the sanitizer for mixed-case path prefixes.
-    // The path should still appear in the output (not redacted) in this case.
-    assert!(
-        clean.message().contains("/Users/admin/.env"),
-        "mixed-case /Users/ prefix not redacted by current implementation"
-    );
+    assert!(!clean.message().contains("/Users/admin/.env"));
+    assert!(clean.message().contains("[REDACTED_PATH]"));
 }
 
 #[test]
@@ -169,7 +159,6 @@ fn query_error_sanitized_multiple_email_addresses() {
 
 #[test]
 fn query_error_sanitized_hex_key_16_chars() {
-    // Exactly 16 hex chars => redacted
     let err = QueryError::response("key a1b2c3d4e5f6a1b2 is invalid");
     let clean = err.sanitized();
     assert!(clean.message().contains("[REDACTED_HEX]"));
@@ -178,7 +167,6 @@ fn query_error_sanitized_hex_key_16_chars() {
 
 #[test]
 fn query_error_sanitized_hex_key_15_chars_not_redacted() {
-    // 15 hex chars => NOT redacted (< 16 threshold)
     let err = QueryError::response("key a1b2c3d4e5f6a1b is short");
     let clean = err.sanitized();
     assert!(clean.message().contains("a1b2c3d4e5f6a1b"));

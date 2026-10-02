@@ -7,7 +7,6 @@ import { docsSchema } from "@astrojs/starlight/schema";
 // Combined content config. The Starlight `docs` collection owns documentation
 // under src/content/docs/docs/** (served at /docs/**). The `blog` collection
 // owns the MDX posts under src/content/blog/** (served at /blog/[slug]).
-// See astro-migration.mdx § "Astro and Starlight configuration" and § "Phase 6".
 export const collections = {
   docs: defineCollection({ loader: docsLoader(), schema: docsSchema() }),
   blog: defineCollection({

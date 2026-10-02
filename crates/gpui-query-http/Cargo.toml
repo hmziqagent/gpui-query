@@ -13,16 +13,16 @@ authors = ["hmziqrs"]
 
 [features]
 default = []
-## Enables the optional `reqwest`-based backend
-## ([`crate::reqwest_backend::ReqwestBackend`]).
-##
-## Off by default so the crate stays usable as a pure, library-agnostic HTTP
-## cache: any request library can plug into
-## [`crate::backend::HttpBackend`].
+## Optional `reqwest` backend; off by default so any client can plug into
+## [`crate::backend::HttpBackend`] instead.
 reqwest = ["dep:reqwest"]
 
+[lib]
+bench = false
+
 [dependencies]
-gpui-query = { path = "../gpui-query", default-features = false, features = ["core"] }
+# `version` must stay alongside `path`: `cargo publish` strips the path override.
+gpui-query = { path = "../gpui-query", version = "0.2", default-features = false, features = ["core"] }
 bytes = "1"
 http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
@@ -31,4 +31,10 @@ thiserror = "2"
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+
+# All-features render: the reqwest-gated module and re-export would otherwise
+# be dead intra-doc links.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

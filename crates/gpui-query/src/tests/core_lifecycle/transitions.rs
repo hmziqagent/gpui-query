@@ -1,34 +1,18 @@
-//! Basic state transition tests (sections 1-6).
-//!
-//! Covers: Idle -> LoadingEmpty, LoadingEmpty -> Success/Failure,
-//! refetch with cached data, LoadingWithData -> Success/Failure.
-
 use crate::core::*;
 use crate::tests::test_support::*;
 
-// ── Helpers ────────────────────────────────────────────────────────────
-
-/// Create a default test resource with LatestWins policy.
 pub fn resource() -> QueryResource<&'static str> {
     test_resource()
 }
 
-/// Create a fresh sequencer.
 pub fn seq() -> RequestSequencer {
     test_sequencer()
 }
 
-/// Extract the error display string from a resource.
 pub fn err_str(r: &QueryResource<&'static str>) -> Option<String> {
     r.error().map(|e| e.to_string())
 }
 
-/// Begin a request, returning (request_id, status).
-///
-/// Panics with a descriptive message if the result is not `Started` or
-/// `StaleCacheHit`. This includes `CacheHit` (which means the cache was
-/// still fresh at `now_ms` -- likely a TTL miscalculation in the test)
-/// and `IgnoredWhileLoading` (which means a request was already active).
 pub fn begin(
     r: &mut QueryResource<&'static str>,
     seq: &mut RequestSequencer,
@@ -68,10 +52,6 @@ pub fn begin(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 1. Idle -> LoadingEmpty
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn idle_to_loading_empty_transitions_correctly() {
     let mut r = resource();
@@ -92,10 +72,6 @@ fn idle_to_loading_empty_transitions_correctly() {
     assert_eq!(r.error(), None, "error should be cleared on begin_loading");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 2. LoadingEmpty -> Success
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn loading_empty_to_success_with_data() {
     let mut r = resource();
@@ -111,10 +87,6 @@ fn loading_empty_to_success_with_data() {
     assert_eq!(r.last_updated_at_ms(), Some(200));
     assert!(r.error().is_none());
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// 3. LoadingEmpty -> Failure
-// ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn loading_empty_to_failure() {
@@ -135,20 +107,14 @@ fn loading_empty_to_failure() {
     assert_eq!(r.last_updated_at_ms(), Some(200));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 4. Idle -> LoadingWithData (refetch with existing cached data)
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn success_to_loading_with_data_on_refetch() {
     let mut r = resource();
     let mut s = seq();
 
-    // Seed data via a successful fetch
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "cached", 200));
 
-    // Refetch (beyond TTL so cache doesn't short-circuit)
     let (rid2, status) = begin(&mut r, &mut s, 1_500);
 
     assert_eq!(status, QueryStatus::LoadingWithData);
@@ -163,20 +129,14 @@ fn success_to_loading_with_data_on_refetch() {
     assert_eq!(r.active_request_id(), Some(rid2));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 5. LoadingWithData -> Success (data updated)
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn loading_with_data_to_success_updates_data() {
     let mut r = resource();
     let mut s = seq();
 
-    // First fetch
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "old", 200));
 
-    // Refetch
     let (rid2, _) = begin(&mut r, &mut s, 1_500);
     assert!(r.complete_current_success(rid2, "new", 1_600));
 
@@ -190,20 +150,14 @@ fn loading_with_data_to_success_updates_data() {
     assert_eq!(r.last_updated_at_ms(), Some(1_600));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 6. LoadingWithData -> Failure (data retained; only cancel clears data)
-// ═══════════════════════════════════════════════════════════════════════
-
 #[test]
 fn loading_with_data_to_failure_retains_data() {
     let mut r = resource();
     let mut s = seq();
 
-    // First fetch succeeds
     let (rid, _) = begin(&mut r, &mut s, 100);
     assert!(r.complete_current_success(rid, "cached", 200));
 
-    // Refetch fails
     let (rid2, _) = begin(&mut r, &mut s, 1_500);
     assert!(r.complete_current_failure(rid2, QueryError::transport("timeout"), 1_600));
 
@@ -219,8 +173,6 @@ fn loading_with_data_to_failure_retains_data() {
         Some(1_600),
         "failure updates last_updated_at"
     );
-    // Cached data is still within TTL window relative to its original timestamp,
-    // but the status is Failure, not Success.
     assert!(r.is_data_stale(), "data with Failure status is stale");
 }
 

@@ -1,102 +1,47 @@
-//! Diagnostic types for query and mutation DevTools.
-//!
-//! **v2 improvements**:
-//! - `QueryDiagnostic.key` uses `to_path()` for full key display (not just first segment)
-//! - `MutationDiagnostic` added for mutation devtools support
-//!
-//! **Audit 3 additions**:
-//! - `DehydratedState` and `DehydratedEntry` for state serialization
-
 #[cfg(feature = "persist")]
 use std::any::TypeId;
 
 use crate::core::{MutationStatus, QueryStatus};
 
-/// Diagnostic information about a single query resource.
 #[derive(Clone, Debug)]
 pub struct QueryDiagnostic {
-    /// Full key path (e.g., "users::42::posts").
+    /// Key path, e.g. "users::42::posts".
     pub key: String,
-    /// Current status.
     pub status: QueryStatus,
-    /// Cache policy label.
     pub cache_policy: String,
-    /// Cache age in milliseconds, if available.
     pub cache_age_ms: Option<u64>,
-    /// Number of cache hits.
     pub cache_hits: u64,
-    /// Number of retries.
     pub retry_count: u32,
 }
 
-/// Diagnostic information about a single mutation resource.
-///
-/// **v2 new**: v1 had no mutation diagnostics.
 #[derive(Clone, Debug)]
 pub struct MutationDiagnostic {
-    /// Optional key associated with this mutation.
     pub key: Option<String>,
-    /// Current status.
     pub status: MutationStatus,
-    /// Number of retries.
     pub retry_count: u32,
 }
 
-/// Aggregate diagnostic for the entire QueryClient.
 #[derive(Clone, Debug, Default)]
 pub struct ClientDiagnostic {
-    /// Total number of tracked query resources.
     pub query_count: usize,
-    /// Total number of tracked mutation resources.
     pub mutation_count: usize,
-    /// Per-query diagnostics.
     pub queries: Vec<QueryDiagnostic>,
-    /// Per-mutation diagnostics.
     pub mutations: Vec<MutationDiagnostic>,
 }
 
-// ── Dehydration / Hydration types (Audit 3, Finding 8) ────────────────
-//
-// Gated behind `persist`: these types back the legacy `dehydrate`/`hydrate`/
-// `persist`/`restore` methods and the `QueryPersister` trait, all of which are
-// `persist`-only. The metadata-only diagnostic types above stay ungated.
-
-/// A single entry in a dehydrated query cache snapshot.
-///
-/// Each entry represents one cached query resource, identified by its key
-/// and the `TypeId` of its `(T, E)` type pair.
-///
-/// The `kind` field distinguishes regular queries, infinite queries, and
-/// mutations, allowing consumers to deserialize appropriately.
-///
-/// **Audit fix #L14**: the `data_json: Option<String>` field was removed —
-/// `dehydrate()` always populated it with `None`, so it was 24 bytes/entry of
-/// dead weight. Typed data serialization (when it lands) will be added as a
-/// real field, not a permanently-`None` placeholder.
 #[cfg(feature = "persist")]
 #[derive(Clone, Debug)]
 pub struct DehydratedEntry {
-    /// Full key path (e.g., "users::42::posts").
+    /// Key path, e.g. "users::42::posts".
     pub key: String,
-    /// `TypeId` of the `(T, E)` (query) or `(T, E)` (infinite query) type pair.
-    /// Used to match entries to concrete types during hydration.
+    /// Matches entries to concrete types during hydration.
     pub type_id: TypeId,
-    /// Whether this entry is a regular query, an infinite query, or a mutation.
+    /// "query", "infinite", or "mutation".
     pub kind: &'static str,
 }
 
-/// A portable snapshot of all cached query state.
-///
-/// Produced by [`QueryClient::dehydrate`](super::QueryClient::dehydrate) and
-/// consumed by [`QueryClient::hydrate`](super::QueryClient::hydrate). Can be
-/// persisted to disk or sent over a network for state restoration.
-///
-/// # Type erasure
-///
-/// Because `QueryClient` uses type-erased buckets, `DehydratedState` stores
-/// `TypeId` values but cannot perform typed deserialization internally.
-/// Callers that know the concrete `T` and `E` types should iterate `entries`
-/// and use `QueryClient::set_query_data` for each matching entry.
+/// Type-erased: callers that know the concrete types iterate `entries` and
+/// call [`set_query_data`](super::QueryClient::set_query_data) per entry.
 ///
 /// # Example
 ///
@@ -120,6 +65,5 @@ pub struct DehydratedEntry {
 #[cfg(feature = "persist")]
 #[derive(Clone, Debug, Default)]
 pub struct DehydratedState {
-    /// All dehydrated cache entries.
     pub entries: Vec<DehydratedEntry>,
 }

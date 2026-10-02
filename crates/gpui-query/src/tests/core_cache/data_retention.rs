@@ -1,11 +1,5 @@
-//! Data retention tests: previous_data and rollback.
-
 use crate::core::*;
 use crate::tests::core_cache::*;
-
-// ══════════════════════════════════════════════════════════════════════════
-// DATA RETENTION: previous_data and rollback
-// ══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn previous_data_tracked_across_successive_successes() {

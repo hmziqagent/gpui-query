@@ -58,7 +58,7 @@ mutate_with_callbacks(
 
 <section class="border-t border-border py-20 sm:py-24">
   <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-    <div class="grid items-start gap-12 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+    <div class="grid grid-cols-1 items-start gap-12 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
       <div>
         <p class="font-mono text-xs tracking-[0.25em] uppercase text-primary">
           <span class="text-primary/50">// </span>surface area
@@ -81,7 +81,7 @@ mutate_with_callbacks(
       <div class="relative">
         <CornerMarks />
         <div class="tabs border border-border bg-card shadow-sm" data-hook-tabs>
-          <nav role="tablist" aria-label="Hook examples" class="flex border-b border-border">
+          <nav role="tablist" aria-label="Hook examples" class="flex min-w-0 max-w-full overflow-x-auto border-b border-border">
             {HOOK_TABS.map((t, i) => (
               <button
                 type="button"
@@ -91,7 +91,7 @@ mutate_with_callbacks(
                 aria-selected={i === 0 ? "true" : "false"}
                 tabindex={i === 0 ? "0" : "-1"}
                 data-tab={t.id}
-                class={`border-r border-border px-4 py-3 font-mono text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none ${
+                class={`border-r border-border shrink-0 whitespace-nowrap px-4 py-3 font-mono text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none ${
                   i === 0 ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"
                 }`}
               >
