@@ -351,7 +351,9 @@ impl QueryClient {
                             };
                             Some(client.collect_persist_delta(&filter, max_age, &state.flushed, cx))
                         });
-                        let Some(delta) = delta.ok().flatten() else {
+                        // gpui-pre's AsyncApp::update_global returns R directly,
+                        // not the Result zed's gpui wraps it in.
+                        let Some(delta) = delta else {
                             return;
                         };
                         // Collect on the main thread (entity reads), save on background (IO).
